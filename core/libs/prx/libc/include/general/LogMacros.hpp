@@ -1,3 +1,5 @@
+#include <cstdint>
+#include <cstdlib>
 #ifndef CORE_LIBS_PRX_LIBC_INCLUDE_GENERAL_LOGMACROS_HPP
 #define CORE_LIBS_PRX_LIBC_INCLUDE_GENERAL_LOGMACROS_HPP
 
@@ -125,5 +127,16 @@ _APS5_LOG_IMPL_NF(stdout, fmt); \
 #define APS5_LOG_OUT_DEBUG(fmt, ...) ((void)0)
 #define APS5_LOG_CHARS_OUT_DEBUG(fmt) ((void)0)
 #endif
+
+// A13: env-gated call tracing (APS5_TRACE_CALLS=1). Entry-trace only; no return capture.
+// Use: APS5_TRACE(myfunc, (uintptr_t)handle)  -> [CALL] tid=.. myfunc obj=..
+// tid = pthread_self() (stable per native thread for the process lifetime; no windows.h needed).
+#include <pthread.h>
+#define APS5_TRACE(fn, obj) \
+do { \
+if (std::getenv("APS5_TRACE_CALLS")) \
+    APS5_LOG_OUT("[CALL] tid=%p %s obj=0x%llx", (void*)pthread_self(), fn, \
+                 (unsigned long long)(obj)); \
+} while (0)
 
 #endif

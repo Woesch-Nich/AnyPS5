@@ -37,6 +37,19 @@ constexpr int SYSTEM_SERVICE_PARAM_TIME_FORMAT_24HOUR = 1;
 constexpr int SYSTEM_SERVICE_PARAM_GAME_PARENTAL_OFF = 0;
 constexpr int SYSTEM_SERVICE_PARAM_ENTER_BUTTON_CROSS = 1;
 
+// sceSystemService event types (SCE_SYSTEM_SERVICE_EVENT_*).
+// Ported from KytyPS5 62643c3424: entitlement update drives guest live-content (LCU) init.
+constexpr int SYSTEM_SERVICE_EVENT_ENTITLEMENT_UPDATE = 0x10000003;
+
+// Cross-module bridge: libSceAppContent posts, libSceSystemService delivers.
+// Implemented in libSceSystemService (one host process, one shared instance).
+// _nid_postfix suffix = cross-PRX NID convention (see AgcDriver* in libSceVideoOut):
+// the NID patcher NID-ifies import names carrying the suffix; exports are NID'd
+// by base name, so both sides converge on ComputeNid(base).
+extern "C" void Aps5SystemService_PostEvent_nid_postfix(int type);
+extern "C" int Aps5SystemService_PopPendingEvent_nid_postfix(int* typeOut);
+extern "C" int Aps5SystemService_PendingEventCount_nid_postfix();
+
 inline int SystemServiceConsoleLanguage(std::string_view caller) {
     const char* configured = std::getenv("ANYPS5_LANGUAGE");
     if (configured == nullptr || configured[0] == '\0') return SYSTEM_SERVICE_PARAM_LANG_ENGLISH_US;

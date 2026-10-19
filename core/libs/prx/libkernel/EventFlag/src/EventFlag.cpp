@@ -1,9 +1,11 @@
 #include <cstdint>
+#include "prx/libc/include/general/LogMacros.hpp"
 #include <cstddef>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
 #include "prx/libkernel/Time/include/TimedWait.hpp"
+#include "prx/libkernel/Pthread/include/JobDiag.hpp"
 #include <chrono>
 #include <mutex>
 #include <string>
@@ -74,6 +76,7 @@ int APS5_VABI sceKernelCreateEventFlag(KernelEventFlag* ef, const char* name, ui
     flag->_multipleWaiters = (attr & EVF_ATTR_MULTI) != 0;
     *ef = flag;
     if (TraceSync()) std::fprintf(stderr, "[evf] create %p '%s' attr=0x%x init=0x%llx\n", static_cast<void*>(flag), name, attr, static_cast<unsigned long long>(init_pattern));
+    if (aps5::jobdiag::DiagEnabled()) aps5::jobdiag::Event("evf-create", reinterpret_cast<std::uintptr_t>(flag));
     return SCE_OK;
 }
 
@@ -93,20 +96,24 @@ int APS5_VABI sceKernelDeleteEventFlag(KernelEventFlag ef) {
 }
 
 int APS5_VABI sceKernelSetEventFlag(KernelEventFlag ef, uint64_t bit_pattern) {
+    APS5_TRACE("sceKernelSetEventFlag", (uintptr_t)ef);
     if (!ef) return SCE_KERNEL_ERROR_ESRCH;
     std::lock_guard lock(ef->_mutex);
     if (ef->_deleted) return SCE_KERNEL_ERROR_ESRCH;
     ef->_pattern |= bit_pattern;
     if (TraceSync()) std::fprintf(stderr, "[evf] set %p '%s' |=0x%llx -> 0x%llx\n", static_cast<void*>(ef), ef->_name.c_str(), static_cast<unsigned long long>(bit_pattern), static_cast<unsigned long long>(ef->_pattern));
+    if (aps5::jobdiag::DiagEnabled()) { char e[96]; std::snprintf(e, sizeof(e), "set|=0x%llx ->0x%llx", (unsigned long long)bit_pattern, (unsigned long long)ef->_pattern); aps5::jobdiag::Event("evf-signal", reinterpret_cast<std::uintptr_t>(ef), e); }
     ef->_changed.NotifyAll();
     return SCE_OK;
 }
 
 int APS5_VABI sceKernelClearEventFlag(KernelEventFlag ef, uint64_t bit_pattern) {
+    APS5_TRACE("sceKernelClearEventFlag", (uintptr_t)ef);
     if (!ef) return SCE_KERNEL_ERROR_ESRCH;
     std::lock_guard lock(ef->_mutex);
     if (ef->_deleted) return SCE_KERNEL_ERROR_ESRCH;
     ef->_pattern &= bit_pattern;
+    if (aps5::jobdiag::DiagEnabled()) { char e[96]; std::snprintf(e, sizeof(e), "keep=0x%llx ->0x%llx", (unsigned long long)bit_pattern, (unsigned long long)ef->_pattern); aps5::jobdiag::Event("evf-clear", reinterpret_cast<std::uintptr_t>(ef), e); }
     return SCE_OK;
 }
 
@@ -122,6 +129,7 @@ int APS5_VABI sceKernelCancelEventFlag(KernelEventFlag ef, uint64_t set_pattern,
 }
 
 int APS5_VABI sceKernelPollEventFlag(KernelEventFlag ef, uint64_t bit_pattern, uint32_t wait_mode, uint64_t* result_pat) {
+    APS5_TRACE("sceKernelPollEventFlag", (uintptr_t)ef);
     if (!ef) return SCE_KERNEL_ERROR_ESRCH;
     if (bit_pattern == 0 || !IsValidWaitMode(wait_mode)) return SCE_KERNEL_ERROR_EINVAL;
     std::lock_guard lock(ef->_mutex);
@@ -136,6 +144,8 @@ int APS5_VABI sceKernelPollEventFlag(KernelEventFlag ef, uint64_t bit_pattern, u
 }
 
 int APS5_VABI sceKernelWaitEventFlag(KernelEventFlag ef, uint64_t bit_pattern, uint32_t wait_mode, uint64_t* result_pat, KernelUseconds* timeout) {
+    APS5_TRACE("sceKernelWaitEventFlag", (uintptr_t)ef);
+    aps5::jobdiag::NoteLastWait("evf", (uintptr_t)ef);
     if (!ef) return SCE_KERNEL_ERROR_ESRCH;
     if (bit_pattern == 0 || !IsValidWaitMode(wait_mode)) return SCE_KERNEL_ERROR_EINVAL;
     std::unique_lock lock(ef->_mutex);
@@ -143,6 +153,7 @@ int APS5_VABI sceKernelWaitEventFlag(KernelEventFlag ef, uint64_t bit_pattern, u
     if (!ef->_multipleWaiters && ef->_waiters != 0) return SCE_KERNEL_ERROR_EPERM;
     const uint64_t generation = ef->_cancelGeneration;
     if (TraceSync()) std::fprintf(stderr, "[evf] wait %p '%s' want=0x%llx mode=0x%x have=0x%llx timeout=%d caller=%p outer=%p\n", static_cast<void*>(ef), ef->_name.c_str(), static_cast<unsigned long long>(bit_pattern), wait_mode, static_cast<unsigned long long>(ef->_pattern), timeout ? static_cast<int>(*timeout) : -1, __builtin_return_address(0), static_cast<void**>(static_cast<void**>(__builtin_frame_address(0))[0])[1]);
+    { char e[128]; std::snprintf(e, sizeof(e), "want=0x%llx have=0x%llx to=%d", (unsigned long long)bit_pattern, (unsigned long long)ef->_pattern, timeout ? static_cast<int>(*timeout) : -1); aps5::jobdiag::Event("evf-wait", reinterpret_cast<std::uintptr_t>(ef), e); }
     const auto released = [&] { return ef->_deleted || ef->_cancelGeneration != generation || IsSatisfied(ef->_pattern, bit_pattern, wait_mode); };
     ++ef->_waiters;
     bool timedOut = false;

@@ -32,6 +32,7 @@ struct Args {
     std::string sceModulePath;
     std::string runPath = "$ORIGIN/libs";
     std::set<std::string> excludedSceModules;
+    std::set<std::string> extraGuestModules;
     std::vector<std::string> moduleDirectories;
     std::vector<std::string> executables;
 };

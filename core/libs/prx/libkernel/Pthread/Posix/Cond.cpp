@@ -1,4 +1,5 @@
 #include "prx/libkernel/Pthread/include/Pthread.hpp"
+#include "prx/libc/include/general/LogMacros.hpp"
 #include "prx/libkernel/Pthread/include/Cond.hpp"
 #include "Common.hpp"
 #include <cstdint>
@@ -27,6 +28,7 @@ int APS5_VABI pthread_cond_destroy_nid_postfix(PthreadCond* cond) {
 }
 
 int APS5_VABI pthread_cond_broadcast_nid_postfix(PthreadCond* cond) {
+    APS5_TRACE("pthread_cond_broadcast_nid_postfix", (uintptr_t)cond);
     return toPosix(scePthreadCondBroadcast(cond));
 }
 
@@ -35,10 +37,12 @@ int APS5_VABI pthread_cond_init_nid_postfix(PthreadCond* cond, const PthreadCond
 }
 
 int APS5_VABI pthread_cond_signal_nid_postfix(PthreadCond* cond) {
+    APS5_TRACE("pthread_cond_signal_nid_postfix", (uintptr_t)cond);
     return toPosix(scePthreadCondSignal(cond));
 }
 
 int APS5_VABI pthread_cond_timedwait_nid_postfix(PthreadCond* cond, PthreadMutex* mutex, const KernelTimespec* abstime) {
+    APS5_TRACE("pthread_cond_timedwait_nid_postfix", (uintptr_t)cond);
     if (!abstime || abstime->tv_nsec < 0 || abstime->tv_nsec >= 1000000000) return PosixThread::GUEST_EINVAL;
     return toPosix(CondOperations::AbsoluteTimedwait(cond, mutex, abstime));
 }
@@ -48,6 +52,7 @@ int APS5_VABI pthread_cond_reltimedwait_np_nid_postfix(PthreadCond* cond, Pthrea
 }
 
 int APS5_VABI pthread_cond_wait_nid_postfix(PthreadCond* cond, PthreadMutex* mutex) {
+    APS5_TRACE("pthread_cond_wait_nid_postfix", (uintptr_t)cond);
     return toPosix(scePthreadCondWait(cond, mutex));
 }
 

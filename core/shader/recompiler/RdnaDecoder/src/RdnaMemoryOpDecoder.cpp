@@ -445,8 +445,22 @@ RdnaOperand scalarSource(std::uint32_t code) {
         case 251u: operand.kind = RdnaOperandKind::VccZ; return operand;
         case 252u: operand.kind = RdnaOperandKind::ExecZ; return operand;
         case 253u: operand.kind = RdnaOperandKind::Scc; return operand;
-        default: throw std::runtime_error("unsupported scalar source operand");
+        default: break;
     }
+
+    // CDNA5 ISA 4.1 special scalar source codes the recompiler does not yet model
+    // with full semantics -> read as zero (Null) to unblock decode (see the matching
+    // table in RdnaInstructionDecoder.cpp). Full closure of 209-254: every special
+    // source code except the explicitly modeled 239/248/251/252/253/255 reads Null,
+    // so decode never throws.
+    if ((code >= 108u && code <= 123u) ||
+        (code >= 209u && code <= 254u && code != 239u && code != 248u &&
+         code != 251u && code != 252u && code != 253u && code != 255u)) {
+        operand.kind = RdnaOperandKind::Null;
+        return operand;
+    }
+
+    throw std::runtime_error("unsupported scalar source operand");
 }
 
 RdnaOperand scalarDestination(std::uint32_t code) {

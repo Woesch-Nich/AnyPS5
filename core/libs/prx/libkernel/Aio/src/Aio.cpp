@@ -1,4 +1,6 @@
 #include <array>
+#include "prx/libc/include/general/LogMacros.hpp"
+#include "prx/libkernel/File/include/AsyncStats.hpp"
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -122,11 +124,13 @@ int ValidateRequests(KernelAioRwRequest* req, std::int32_t size, const void* id)
 int SubmitCommands(KernelAioRwRequest* req, std::int32_t size, bool write, std::int32_t* id) {
     const int error = ValidateRequests(req, size, id);
     if (error != 0) return error;
+    Aps5Async::aioSubmit(size);
     const std::int32_t queue = AllocateId();
     bool aborted = false;
     for (std::int32_t i = 0; i < size; ++i) {
         if (!RunRequest(req[i], write)) aborted = true;
     }
+    Aps5Async::aioComplete(size);
     SetState(queue, aborted ? AioAborted : AioCompleted);
     *id = queue;
     return 0;
@@ -135,12 +139,14 @@ int SubmitCommands(KernelAioRwRequest* req, std::int32_t size, bool write, std::
 int SubmitCommandsMultiple(KernelAioRwRequest* req, std::int32_t size, bool write, std::int32_t* id, const char* name) {
     const int error = ValidateRequests(req, size, id);
     if (error != 0) return error;
+    Aps5Async::aioSubmit(size);
     if (size > AioRequestNumMax) throw std::runtime_error(std::string(name) + ": more than 128 requests per batch is not modelled");
     for (std::int32_t i = 0; i < size; ++i) {
         const std::int32_t queue = AllocateId();
         SetState(queue, RunRequest(req[i], write) ? AioCompleted : AioAborted);
         id[i] = queue;
     }
+    Aps5Async::aioComplete(size);
     return 0;
 }
 
@@ -231,26 +237,31 @@ int APS5_VABI sceKernelAioSetParam(KernelAioSchedulingParam* param, int32_t sche
 }
 
 int APS5_VABI sceKernelAioSubmitReadCommands(KernelAioRwRequest* req, int32_t size, int32_t prio, int32_t* id) {
+    APS5_TRACE("sceKernelAioSubmitReadCommands", (uintptr_t)req);
     (void)prio;
     return SubmitCommands(req, size, false, id);
 }
 
 int APS5_VABI sceKernelAioSubmitWriteCommands(KernelAioRwRequest* req, int32_t size, int32_t prio, int32_t* id) {
+    APS5_TRACE("sceKernelAioSubmitWriteCommands", (uintptr_t)req);
     (void)prio;
     return SubmitCommands(req, size, true, id);
 }
 
 int APS5_VABI sceKernelAioSubmitReadCommandsMultiple(KernelAioRwRequest* req, int32_t size, int32_t prio, int32_t* id) {
+    APS5_TRACE("sceKernelAioSubmitReadCommandsMultiple", (uintptr_t)req);
     (void)prio;
     return SubmitCommandsMultiple(req, size, false, id, "sceKernelAioSubmitReadCommandsMultiple");
 }
 
 int APS5_VABI sceKernelAioSubmitWriteCommandsMultiple(KernelAioRwRequest* req, int32_t size, int32_t prio, int32_t* id) {
+    APS5_TRACE("sceKernelAioSubmitWriteCommandsMultiple", (uintptr_t)req);
     (void)prio;
     return SubmitCommandsMultiple(req, size, true, id, "sceKernelAioSubmitWriteCommandsMultiple");
 }
 
 int APS5_VABI sceKernelAioPollRequest(int32_t id, int32_t* state) {
+    APS5_TRACE("sceKernelAioPollRequest", (uintptr_t)id);
     if (state == nullptr) return SCE_KERNEL_ERROR_EFAULT;
     if (!ValidId(id)) return SCE_KERNEL_ERROR_EINVAL;
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -259,6 +270,7 @@ int APS5_VABI sceKernelAioPollRequest(int32_t id, int32_t* state) {
 }
 
 int APS5_VABI sceKernelAioWaitRequests(int32_t* id, int32_t num, int32_t* state, uint32_t mode, uint32_t* usec) {
+    APS5_TRACE("sceKernelAioWaitRequests", (uintptr_t)id);
     const int error = ValidateIds(id, num, state, "sceKernelAioWaitRequests");
     if (error != 0) return error;
     if (mode != AioWaitAnd && mode != AioWaitOr) throw std::runtime_error("sceKernelAioWaitRequests: unsupported wait mode");
@@ -284,6 +296,7 @@ int APS5_VABI sceKernelAioWaitRequests(int32_t* id, int32_t num, int32_t* state,
 }
 
 int APS5_VABI sceKernelAioWaitRequest(int32_t id, int32_t* state, uint32_t* usec) {
+    APS5_TRACE("sceKernelAioWaitRequest", (uintptr_t)id);
     if (state == nullptr) return SCE_KERNEL_ERROR_EFAULT;
     if (!ValidId(id)) return SCE_KERNEL_ERROR_EINVAL;
     const auto start = std::chrono::steady_clock::now();

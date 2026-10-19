@@ -9,13 +9,29 @@
 #include <cstddef>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+namespace {
+const bool kFlipTrace = [] { return std::getenv("APS5_TRACE_FLIP") != nullptr; }();
+unsigned flipTid() {
+#ifdef _WIN32
+    return ::GetCurrentThreadId();
+#else
+    return 0;
+#endif
+}
+}
 
 int AgcDriver::SubmitMany(std::uint32_t* const* addresses, const std::uint32_t* sizes, std::uint32_t count, std::uint32_t queue) {
     if (count == 0) return 0;
+    if (kFlipTrace) std::fprintf(stderr, "[flip] submit-api AgcDriver::SubmitMany count=%u queue=0x%x tid=0x%x\n", count, queue, flipTid());
     if (!addresses || !sizes) throw std::runtime_error("AGC driver: null multi-submit arrays");
     AgcDriver::GuestMemory::CheckRange(addresses, count * sizeof(*addresses), alignof(std::uint32_t*));
     AgcDriver::GuestMemory::CheckRange(sizes, count * sizeof(*sizes), alignof(std::uint32_t));
     for (std::uint32_t i = 0; i < count; ++i) {
+        if (kFlipTrace) std::fprintf(stderr, "[flip]   multi-dcb[%u/%u] addr=0x%x dwords=%u tid=0x%x\n", i + 1, count, (uintptr_t)addresses[i], sizes[i], flipTid());
         const Packet packet{addresses[i], sizes[i], 0, {}};
         AgcDriver::Submit(&packet, queue);
     }
@@ -41,6 +57,7 @@ std::uint32_t APS5_VABI sceAgcDriverWaitUntilSafeForRendering(std::uint32_t** co
 }
 
 int APS5_VABI sceAgcDriverSubmitDcb(const Packet* packet) {
+    if (kFlipTrace) std::fprintf(stderr, "[flip] submit-api sceAgcDriverSubmitDcb dwords=%u tid=0x%x\n", packet ? packet->dw_num : 0, flipTid());
     AgcDriver::Submit(packet, 0);
     return 0;
 }
@@ -50,6 +67,7 @@ int APS5_VABI sceAgcDriverSubmitMultiDcbs(std::uint32_t* const* dcbGpuAddrs, con
 }
 
 int APS5_VABI sceAgcDriverAgrSubmitDcb(const Packet* packet) {
+    if (kFlipTrace) std::fprintf(stderr, "[flip] submit-api sceAgcDriverAgrSubmitDcb dwords=%u tid=0x%x\n", packet ? packet->dw_num : 0, flipTid());
     AgcDriver::Submit(packet, 0);
     return 0;
 }

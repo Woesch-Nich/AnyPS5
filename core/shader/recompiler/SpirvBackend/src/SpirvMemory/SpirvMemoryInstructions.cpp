@@ -13,6 +13,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
+#include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace ShaderRecompiler {
@@ -1483,6 +1485,53 @@ std::uint32_t EmitReadConst(SpirvValueEmitContext& ctx, const IrValue& inst) {
     if (!guarded.empty()) {
         const IrValue* slot = inst.Argument(1)->Resolve();
         if (!slot->HasImmediate()) {
+            // #A147-answer diagnostic: pin down which ReadConst fails and whether its result
+            // feeds only a recognised SRT table's descriptor dwords (dead -> drop) or has other
+            // users (sampler/buffer/arithmetic -> not dead; mail them).
+            {
+                const auto& sources = resources.descriptorSources;
+                std::unordered_set<const IrValue*> tableDwords;
+                int tableCount = 0;
+                for (const auto& src : sources) {
+                    if (src.tableColumn.has_value()) {
+                        ++tableCount;
+                        for (std::uint32_t i = 0; i < src.dwordCount; ++i) {
+                            if (src.dwords[i]) tableDwords.insert(src.dwords[i]->Resolve());
+                        }
+                    }
+                }
+                const bool failIsDword = tableDwords.count(inst.Resolve()) != 0u;
+                std::fprintf(stderr,
+                    "[srt-diag] FAIL ReadConst inst=%%%u %s | failIsTableDword=%d | slot=%%%u %s phi=%d block=%u phiArms=%u | srtTables=%u tableDwords=%zu users=%zu\n",
+                    inst.Id(), std::string(IrOpcodeName(inst.Opcode())).c_str(),
+                    failIsDword ? 1 : 0,
+                    slot->Id(), std::string(IrOpcodeName(slot->Opcode())).c_str(),
+                    slot->IsPhi() ? 1 : 0,
+                    slot->Parent() ? slot->Parent()->Id() : 0u,
+                    slot->IsPhi() ? static_cast<int>(slot->PhiBlockCount()) : 0,
+                    tableCount, tableDwords.size(), inst.UseCount());
+                int nonTableUsers = 0;
+                for (std::size_t u = 0; u < inst.UseCount(); ++u) {
+                    const IrValue* user = inst.Uses()[u];
+                    const IrValue* resolved = user->Resolve();
+                    const bool isDword = tableDwords.count(resolved) != 0u;
+                    std::fprintf(stderr,
+                        "[srt-diag]   user[%zu]=%%%u %s block=%u isTableDword=%d\n",
+                        u, user->Id(), std::string(IrOpcodeName(user->Opcode())).c_str(),
+                        user->Parent() ? user->Parent()->Id() : 0u, isDword ? 1 : 0);
+                    if (!isDword) ++nonTableUsers;
+                }
+                for (const IrValue* dw : tableDwords) {
+                    std::fprintf(stderr,
+                        "[srt-diag]   tableDword=%%%u %s block=%u\n",
+                        dw->Id(), std::string(IrOpcodeName(dw->Opcode())).c_str(),
+                        dw->Parent() ? dw->Parent()->Id() : 0u);
+                }
+                std::fprintf(stderr,
+                    "[srt-diag]   => %s (nonTableUsers=%d)\n",
+                    nonTableUsers == 0 ? "DEAD: only table dwords (drop it)" : "NOT DEAD: has non-table user(s)",
+                    nonTableUsers);
+            }
             ctx.Fail(inst, "reads the flattened SRT at a runtime slot while some slots are guarded");
         }
         const auto found = std::lower_bound(guarded.begin(), guarded.end(), slot->ImmediateU32());

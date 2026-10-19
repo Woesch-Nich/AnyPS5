@@ -8,6 +8,9 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "SDL.h"
 #include "SDL_vulkan.h"
@@ -33,6 +36,16 @@
 #include "prx/libc/include/Shutdown.hpp"
 
 namespace {
+const bool kFlipTrace = [] { return std::getenv("APS5_TRACE_FLIP") != nullptr; }();
+double flipMs() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+unsigned flipTid() {
+#ifdef _WIN32
+    return ::GetCurrentThreadId();
+#else
+    return 0;
+#endif
+}
+
 
 constexpr std::uint64_t FLIP_ROOM_WAIT_MICROS = 60000000;
 constexpr std::uint64_t PRESENT_POLL_MICROS = 10000;
@@ -105,12 +118,15 @@ public:
     RenderingWait(std::shared_ptr<VideoOutConfig> config, std::uint32_t index, std::uint64_t ticket)
         : _config(std::move(config)), _index(index), _ticket(ticket) {}
     void Wait() override {
+        if (kFlipTrace) std::fprintf(stderr, "[flip] rw-wait start idx=%u ticket=%llu tid=0x%x\n", _index, static_cast<unsigned long long>(_ticket), flipTid());
+        const auto start = flipMs();
         std::unique_lock lock(_config->mutex);
         _config->vblankCond.wait(lock, _config->shutdownToken, [&] {
             return _config->failure || _config->Closed() ||
                 _config->bufferReuse[_index].IsComplete(_ticket);
         });
         _config->CheckAlive();
+        if (kFlipTrace) std::fprintf(stderr, "[flip] rw-wait end idx=%u ticket=%llu took=%.1f ms vblankCount=%llu tid=0x%x\n", _index, static_cast<unsigned long long>(_ticket), flipMs() - start, static_cast<unsigned long long>(_config->vblankStatus.count), flipTid());
     }
 };
 
@@ -122,14 +138,19 @@ public:
         std::lock_guard lock(cfg->mutex);
         checkConfig(*cfg);
         require(index < VIDEO_OUT_BUFFER_NUM_MAX && cfg->buffers[index].Occupied(), "wait buffer is not registered");
-        return std::make_shared<RenderingWait>(cfg, index, cfg->bufferReuse[index].Capture());
+        const auto ticket = cfg->bufferReuse[index].Capture();
+        if (kFlipTrace) std::fprintf(stderr, "[flip] rw-capture idx=%u ticket=%llu tid=0x%x\n", index, static_cast<unsigned long long>(ticket), flipTid());
+        return std::make_shared<RenderingWait>(cfg, index, ticket);
     }
 
     void WaitForFlipRoom() override {
+        if (kFlipTrace) std::fprintf(stderr, "[flip] flip-room-wait start res=%zu tid=0x%x\n", queue->reservations.load(), flipTid());
+        const auto start = flipMs();
         std::unique_lock queueLock(queue->mutex);
         const bool room = queue->changed.WaitUntil(queueLock, TimedWait::DeadlineNanos(FLIP_ROOM_WAIT_MICROS), [&] {
             return queue->failure || queue->stopping || cfg->shutdownToken.stop_requested() || queue->reservations.load() < VIDEO_OUT_FLIP_QUEUE_CAPACITY;
         });
+        if (kFlipTrace) std::fprintf(stderr, "[flip] flip-room-wait end res=%zu room=%d took=%.1f ms tid=0x%x\n", queue->reservations.load(), room ? 1 : 0, flipMs() - start, flipTid());
         if (queue->failure) std::rethrow_exception(queue->failure);
         if (queue->stopping || cfg->shutdownToken.stop_requested()) throw ProcessShutdown{};
         require(room, "flip queue stayed full for 60 s: the presenter is not completing flips");
@@ -220,6 +241,7 @@ void FlipRequest::Cancel() noexcept {
 }
 
 void FlipRequest::GpuReady(const std::shared_ptr<AgcDriver::FrameTiming>& frameTiming) {
+    if (kFlipTrace) std::fprintf(stderr, "[flip] flip-enqueue idx=%d output=%d mode=%d arg=%lld tid=0x%x\n", index, outputHandle, flipMode, static_cast<long long>(flipArg), flipTid());
     require(frameTiming != nullptr, "missing frame timing");
     timing = frameTiming;
     {
@@ -661,6 +683,7 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
                 if (!flipQueue->requests.empty()) {
                     current = std::move(flipQueue->requests.front());
                     flipQueue->requests.pop_front();
+                    if (kFlipTrace) std::fprintf(stderr, "[flip] present-dequeue idx=%d pending=%zu res=%zu vblankCount=%llu tid=0x%x\n", current->index, flipQueue->requests.size(), flipQueue->reservations.load(), static_cast<unsigned long long>(current->cfg->vblankStatus.count), flipTid());
                 }
             }
 
@@ -685,7 +708,9 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
                 require(current->timing != nullptr, "missing presentation timing");
                 const auto dequeued = AgcDriver::FrameTiming::Clock::now();
                 current->timing->Add(current->timing->Get("VideoOut", "queue"), dequeued - current->queuedAt);
+                const auto flipStart = flipMs();
                 processFlip(*current);
+                if (kFlipTrace) std::fprintf(stderr, "[flip] present-done idx=%d took=%.1f ms res=%zu vblankCount=%llu tid=0x%x\n", current->index, flipMs() - flipStart, flipQueue->reservations.load(), static_cast<unsigned long long>(current->cfg->vblankStatus.count), flipTid());
                 int windowWidth = 0;
                 int windowHeight = 0;
                 if (window.Handle() != nullptr) SDL_GetWindowSize(window.Handle(), &windowWidth, &windowHeight);

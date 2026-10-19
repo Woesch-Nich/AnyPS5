@@ -6,6 +6,7 @@
 #include "prx/libkernel/KernelErrors.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
 #include "prx/libkernel/Time/include/TimedWait.hpp"
+#include "prx/libkernel/Pthread/include/JobDiag.hpp"
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -80,6 +81,7 @@ int waitUntil(PthreadCond* cond, PthreadMutex* mutex, std::optional<std::uint64_
         return error;
     bool timedOut = false;
     const auto waitStart = std::chrono::steady_clock::now();
+    if (aps5::jobdiag::DiagEnabled()) aps5::jobdiag::Event("cond-wait", reinterpret_cast<std::uintptr_t>(cond));
     struct Trace {
         const void* caller; const bool& timedOut; std::chrono::steady_clock::time_point start;
         ~Trace() { KernelTraceWait_nid_postfix("cond", caller, static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count()), timedOut); }
@@ -108,6 +110,7 @@ int waitUntil(PthreadCond* cond, PthreadMutex* mutex, std::optional<std::uint64_
     m->_owner.store(std::this_thread::get_id(), std::memory_order_release);
     lock.release();
     ThreadCancel::Check();
+    if (aps5::jobdiag::DiagEnabled()) aps5::jobdiag::Event("cond-wake", reinterpret_cast<std::uintptr_t>(cond));
     return timedOut ? sceTimedOut : 0;
 }
 
@@ -165,11 +168,13 @@ int APS5_VABI scePthreadCondDestroy(PthreadCond* cond) {
 }
 
 int APS5_VABI scePthreadCondSignal(PthreadCond* cond) {
+    if (aps5::jobdiag::DiagEnabled()) aps5::jobdiag::Event("cond-signal", reinterpret_cast<std::uintptr_t>(cond));
     resolveCond(cond)->_cv.NotifyOne();
     return 0;
 }
 
 int APS5_VABI scePthreadCondBroadcast(PthreadCond* cond) {
+    if (aps5::jobdiag::DiagEnabled()) aps5::jobdiag::Event("cond-broadcast", reinterpret_cast<std::uintptr_t>(cond));
     resolveCond(cond)->_cv.NotifyAll();
     return 0;
 }

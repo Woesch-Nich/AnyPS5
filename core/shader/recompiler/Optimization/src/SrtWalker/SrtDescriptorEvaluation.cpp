@@ -107,6 +107,18 @@ bool evaluateRuntimeSources(const IrResourcePlan& program, std::span<const std::
         cleanEvaluator.ReportInaccessibleReads(nullptr);
         cleanEvaluator.ReportNullRootReads(nullptr);
     }
+    if (debug) {
+        for (std::size_t source = 0; source < program.descriptorSources.size(); ++source) {
+            const auto& src = program.descriptorSources[source];
+            std::string dwords;
+            for (std::uint32_t index = 0; index < src.dwordCount; ++index) {
+                dwords += DescribeValue(src.dwords[index], 3);
+                dwords += ";";
+            }
+            std::fprintf(stderr, "[srt] source %zu active=%u dwords(%u) = %s\n", source,
+                         evaluateFlat ? (int)active.at(source) : -1, (unsigned)src.dwordCount, dwords.c_str());
+        }
+    }
     InaccessibleRead inaccessible;
     std::uint32_t nullRoots = 0;
     if (evaluateFlat && poison != nullptr) {

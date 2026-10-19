@@ -27,6 +27,9 @@ uintptr_t APS5_VABI sceKernelGetEventId(const KernelEvent* ev);
 void* APS5_VABI sceKernelGetEventUserData(const KernelEvent* ev);
 }
 
+// #A175: libkernel completion-poster (posts to every registered (equeue, ident)).
+namespace aps5 { namespace ampr { int AmprPostAll(unsigned long long data); } }
+
 static constexpr int SCE_OK = 0;
 static constexpr int SCE_KERNEL_ERROR_ENOENT = static_cast<int>(0x80020002);
 static constexpr int SCE_KERNEL_ERROR_EBADF = static_cast<int>(0x80020009);
@@ -246,12 +249,41 @@ static void VerifyRepeatedAmprCompletionsAreNotLost() {
     Require(sceKernelDeleteEqueue(eq) == SCE_OK);
 }
 
+// #A175: the completion post must reach the (equeue, ident) registered via
+// sceKernelAddAmprEvent, and AmprPostAll must report the exact target count.
+static void VerifyAmprPostAllReachesRegisteredEqueue() {
+    KernelEqueue eq = 0;
+    Require(sceKernelCreateEqueue(&eq, "ampr-postall") == SCE_OK);
+    KernelEvent events[2]{};
+    int count = 0;
+    const KernelUseconds poll = 0;
+    int udata = 0;
+
+    Require(sceKernelAddAmprEvent(eq, 0x400, &udata) == SCE_OK);
+    // One target registered (this equeue @ 0x400) -> AmprPostAll posts exactly 1.
+    Require(aps5::ampr::AmprPostAll(0x77) == 1);
+    Require(sceKernelWaitEqueue(eq, events, 2, &count, &poll) == SCE_OK);
+    Require(count == 1);
+    Require(sceKernelGetEventFilter(&events[0]) == EVFILT_AMPR);
+    Require(sceKernelGetEventId(&events[0]) == 0x400);
+    Require(sceKernelGetEventData(&events[0]) == 0x77);
+    Require(sceKernelGetEventUserData(&events[0]) == &udata);
+    Require(sceKernelWaitEqueue(eq, events, 2, &count, &poll) == SCE_KERNEL_ERROR_ETIMEDOUT);
+
+    Require(sceKernelDeleteAmprEvent(eq, 0x400) == SCE_OK);
+    // No target for this ident after unregister -> AmprPostAll posts 0.
+    Require(aps5::ampr::AmprPostAll(0x77) == 0);
+    Require(sceKernelWaitEqueue(eq, events, 2, &count, &poll) == SCE_KERNEL_ERROR_ETIMEDOUT);
+    Require(sceKernelDeleteEqueue(eq) == SCE_OK);
+}
+
 int main() {
     VerifyPeriodicTimer();
     VerifyUserEventReportedOncePerWait();
     VerifyBlockingWaitReportsLevelEventOnce();
     VerifyEdgeUserEventReportedOnce();
     VerifyRepeatedAmprCompletionsAreNotLost();
+    VerifyAmprPostAllReachesRegisteredEqueue();
 
     KernelEqueue eq = 0;
     Require(sceKernelCreateEqueue(&eq, "events") == SCE_OK);

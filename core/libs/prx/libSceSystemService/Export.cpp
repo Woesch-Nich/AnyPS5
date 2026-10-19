@@ -12,6 +12,8 @@
 #include <string_view>
 #include <system_error>
 #include <vector>
+#include <mutex>
+#include <deque>
 #if defined(_WIN32)
 #include <windows.h>
 #elif defined(__linux__)
@@ -24,6 +26,31 @@
 #include "prx/libkernel/KernelErrors.hpp"
 #include "prx/libSceSystemService/SystemService.hpp"
 #include "prx/libSceAgcDriver/Execution/include/HostHdr.hpp"
+
+// ---- SystemService event queue (port of KytyPS5 62643c3424, re-applied on a254-integration) ----
+// Real PS5 posts SCE_SYSTEM_SERVICE_EVENT_ENTITLEMENT_UPDATE on LCU install/update;
+
+// this module delivers via sceSystemServiceGetStatus/ReceiveEvent.
+namespace {
+std::mutex g_ss_event_mutex;
+std::deque<int> g_ss_pending_events;
+}
+extern "C" void Aps5SystemService_PostEvent_nid_postfix(int type) {
+    std::scoped_lock lock(g_ss_event_mutex);
+    g_ss_pending_events.push_back(type);
+    APS5_LOG_OUT("[SystemService] event posted: 0x%08x (queue=%zu)", static_cast<unsigned>(type), g_ss_pending_events.size());
+}
+extern "C" int Aps5SystemService_PopPendingEvent_nid_postfix(int* typeOut) {
+    std::scoped_lock lock(g_ss_event_mutex);
+    if (g_ss_pending_events.empty()) return -1;
+    if (typeOut) *typeOut = g_ss_pending_events.front();
+    g_ss_pending_events.pop_front();
+    return 0;
+}
+extern "C" int Aps5SystemService_PendingEventCount_nid_postfix() {
+    std::scoped_lock lock(g_ss_event_mutex);
+    return static_cast<int>(g_ss_pending_events.size());
+}
 
 namespace {
 
@@ -270,6 +297,7 @@ int APS5_VABI sceSystemServiceGetStatus(SystemServiceStatus* status) {
   return SYSTEM_SERVICE_ERROR_PARAMETER;
  }
  *status = SystemServiceStatus{};
+ status->event_num = Aps5SystemService_PendingEventCount_nid_postfix();
  return SYSTEM_SERVICE_OK;
 }
 
@@ -318,7 +346,12 @@ int APS5_VABI sceSystemServiceReceiveEvent(SystemServiceEvent* event) {
  if (event == nullptr) {
   return SYSTEM_SERVICE_ERROR_PARAMETER;
  }
- return SYSTEM_SERVICE_ERROR_NO_EVENT;
+ int type = 0;
+ if (Aps5SystemService_PopPendingEvent_nid_postfix(&type) != 0) {
+  return SYSTEM_SERVICE_ERROR_NO_EVENT;
+ }
+ event->event_type = type;
+ return SYSTEM_SERVICE_OK;
 }
 
 int APS5_VABI sceSystemServiceReportAbnormalTermination(const void* info) {

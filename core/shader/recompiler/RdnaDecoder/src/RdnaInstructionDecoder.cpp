@@ -6,6 +6,7 @@
 #include "RdnaDecoder/RdnaScalarOpDecoder.hpp"
 #include "RdnaDecoder/RdnaVectorOpDecoder.hpp"
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cstdio>
 #include <stdexcept>
@@ -89,11 +90,60 @@ RdnaInstructionFamily GetRdnaInstructionFamily(std::uint32_t word) {
     }
 }
 
+namespace {
+
+// [probe] APS5_DECODE_FAIL_PROBE=1 -> on any per-instruction decode failure,
+// dump the failing raw word plus a 32-word window to shader_decode_fail_probe.txt
+void DecodeFailProbe(std::uint32_t programCounter, std::span<const std::uint32_t> code, std::uint32_t wordIndex) {
+    static std::atomic<std::uint32_t> counter{0};
+    std::FILE* file = std::fopen("shader_decode_fail_probe.txt", "a");
+    if (file == nullptr) return;
+    const std::uint32_t seq = counter.fetch_add(1) + 1;
+    std::fprintf(file, "decode fail seq=%u pc=0x%x wordIndex=%u codeWords=%u\n", seq, programCounter, wordIndex, static_cast<unsigned>(code.size()));
+    const std::uint32_t begin = wordIndex >= 16u ? wordIndex - 16u : 0u;
+    for (std::uint32_t i = begin; i < code.size() && i < begin + 32u; ++i) {
+        const bool hot = i == wordIndex;
+        std::fprintf(file, "  %08x %c raw=0x%08x family=%d\n", static_cast<unsigned>(i * 4u), hot ? '>' : ' ', static_cast<unsigned>(code[i]), static_cast<int>(GetRdnaInstructionFamily(code[i])));
+    }
+    std::fflush(file);
+    std::fclose(file);
+}
+
+}  // namespace
+
 RdnaInstruction DecodeRdnaInstruction(std::uint32_t programCounter, std::span<const std::uint32_t> code, std::uint32_t wordIndex) {
     if (wordIndex >= code.size()) {
         throw std::out_of_range("word index is out of the code span bounds");
     }
-
+    if (std::getenv("APS5_DECODE_FAIL_PROBE") != nullptr) {
+        try {
+            switch (GetRdnaInstructionFamily(code[wordIndex])) {
+                case RdnaInstructionFamily::SOP1: return DecodeRdnaSop1(programCounter, code, wordIndex);
+                case RdnaInstructionFamily::SOP2: return DecodeRdnaSop2(programCounter, code, wordIndex);
+                case RdnaInstructionFamily::SOPK: return DecodeRdnaSopk(programCounter, code, wordIndex);
+                case RdnaInstructionFamily::SOPC: return DecodeRdnaSopc(programCounter, code, wordIndex);
+                case RdnaInstructionFamily::SOPP: return DecodeRdnaSopp(programCounter, code, wordIndex);
+                case RdnaInstructionFamily::VOP1: return DecodeRdnaVop1(programCounter, code, wordIndex);
+                case RdnaInstructionFamily::VOP2: return DecodeRdnaVop2(programCounter, code, wordIndex);
+                case RdnaInstructionFamily::VOP3: return DecodeRdnaVop3(programCounter, code, wordIndex);
+                case RdnaInstructionFamily::VOP3P: return DecodeRdnaVop3p(programCounter, code, wordIndex);
+                case RdnaInstructionFamily::VOPC: return DecodeRdnaVopc(programCounter, code, wordIndex);
+                case RdnaInstructionFamily::VINTRP: return DecodeRdnaVintrp(programCounter, code, wordIndex);
+                case RdnaInstructionFamily::SMEM: return DecodeRdnaSmem(programCounter, code, wordIndex);
+                case RdnaInstructionFamily::MUBUF: return DecodeRdnaMubuf(programCounter, code, wordIndex);
+                case RdnaInstructionFamily::MTBUF: return DecodeRdnaMtbuf(programCounter, code, wordIndex);
+                case RdnaInstructionFamily::FLAT: return DecodeRdnaFlat(programCounter, code, wordIndex);
+                case RdnaInstructionFamily::DS: return DecodeRdnaDs(programCounter, code, wordIndex);
+                case RdnaInstructionFamily::MIMG: return DecodeRdnaMimg(programCounter, code, wordIndex);
+                case RdnaInstructionFamily::EXP: return DecodeRdnaExportOp(programCounter, code, wordIndex);
+                default: break;
+            }
+            throw std::invalid_argument("unknown RDNA instruction family at program counter " + toHexString(programCounter) + " raw word " + toHexString(code[wordIndex]));
+        } catch (...) {
+            DecodeFailProbe(programCounter, code, wordIndex);
+            throw;
+        }
+    }
     switch (GetRdnaInstructionFamily(code[wordIndex])) {
         case RdnaInstructionFamily::SOP1: return DecodeRdnaSop1(programCounter, code, wordIndex);
         case RdnaInstructionFamily::SOP2: return DecodeRdnaSop2(programCounter, code, wordIndex);
@@ -231,6 +281,31 @@ RdnaOperand DecodeRdnaScalarSource(std::uint32_t code, std::uint32_t programCoun
         case 253u: operand.kind = RdnaOperandKind::Scc; return operand;
         case 255u: operand.kind = RdnaOperandKind::LiteralConstant; return operand;
         default: break;
+    }
+
+    // CDNA5 ISA 4.1 special scalar source codes the recompiler does not yet model
+    // with full semantics -> read as zero (Null) to unblock decode. Reserved codes
+    // read zero by spec; the memory/aperture/DPP ones are stubs (refine per-code when
+    // a shader's correctness depends on the real value).
+    //   108-123  TTMP (privileged trap-handler temporaries)
+    //   209-229  reserved
+    //   230/231  FLAT_SCRATCH_BASE_LOW/HIGH
+    //   232      reserved
+    //   233/234  DPP8 / DPP8FI
+    //   235/236  SHARED_BASE / SHARED_LIMIT (memory aperture)
+    //   237/238  reserved
+    //   249      reserved
+    //   250      DPP16
+    //   254      reserved (64-bit literal slot; recompiler models 32-bit literal @255)
+    // (239 = PopsExitingWaveId and 240-253/255 are handled by the switch above.)
+    // Full closure: every other special source code in 209-254 (reserved, or
+    // modeled-by-zero) reads as Null so decode never throws; the explicitly
+    // modeled codes (239, 248, 251-253, 255) are excluded.
+    if ((code >= 108u && code <= 123u) ||
+        (code >= 209u && code <= 254u && code != 239u && code != 248u &&
+         code != 251u && code != 252u && code != 253u && code != 255u)) {
+        operand.kind = RdnaOperandKind::Null;
+        return operand;
     }
 
     throw std::invalid_argument("unsupported scalar source operand code " + std::to_string(code) + " at program counter " + std::to_string(programCounter));

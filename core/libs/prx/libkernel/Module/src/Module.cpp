@@ -165,8 +165,7 @@ int APS5_VABI sceKernelDlsym(KernelModule handle, const char* symbol, void** add
  if (!symbol || !addr) return SCE_KERNEL_ERROR_EFAULT;
  void* module = handle == 0 ? dlopen_nid_postfix(nullptr, kRtldNow) : reinterpret_cast<void*>(static_cast<intptr_t>(handle));
  void* found = dlsym_nid_postfix(module, symbol);
- if (handle == 0 && module) dlclose_nid_postfix(module);
- if (!found) return SCE_KERNEL_ERROR_ESRCH;
+ if (handle == 0 && module) dlclose_nid_postfix(module); if (!found) return SCE_KERNEL_ERROR_ESRCH;
  *addr = found;
  return 0;
 }
@@ -282,12 +281,15 @@ KernelModule APS5_VABI sceKernelLoadStartModule(const char* module_file_name, si
  pendingModuleArgs = {args, argp};
  pendingModuleInitResult = 0;
  void* handle = dlopen_nid_postfix(module_file_name, kRtldNow);
- const int started = pendingModuleInitResult;
+ if (!handle) {
+  APS5_LOG_OUT("[mod] sceKernelLoadStartModule(%s) -> FAIL ENOENT (0x%x)", module_file_name, SCE_KERNEL_ERROR_ENOENT);
+  return static_cast<KernelModule>(SCE_KERNEL_ERROR_ENOENT);
+ }
+ APS5_LOG_OUT("[mod] sceKernelLoadStartModule(%s) -> OK handle=0x%llx", module_file_name, static_cast<unsigned long long>(reinterpret_cast<intptr_t>(handle))); const int started = pendingModuleInitResult;
  pendingModuleArgs = {};
  pendingModuleInitResult = 0;
  if (res) *res = started;
- if (!handle) return static_cast<KernelModule>(SCE_KERNEL_ERROR_ENOENT);
- return static_cast<KernelModule>(reinterpret_cast<intptr_t>(handle));
+ if (!handle) return static_cast<KernelModule>(SCE_KERNEL_ERROR_ENOENT); return static_cast<KernelModule>(reinterpret_cast<intptr_t>(handle));
 }
 
 int APS5_VABI sceKernelStopUnloadModule(KernelModule handle, size_t args, const void* argp, uint32_t flags, const KernelUnloadModuleOpt* opt, int* res) {
@@ -303,11 +305,32 @@ int APS5_VABI sceKernelStopUnloadModule(KernelModule handle, size_t args, const 
 
 extern "C" {
 
+namespace {
+// The game passes dlpi_phdr tables that can point at unmapped guest memory
+// (observed: 0x185b34760 during thread-local teardown). Probing a pointer with
+// a plain deref is what turns "no matching segment" into a 0xc0000005 AV inside
+// this predicate. Return a copy of the header only when the page is committed
+// and readable; otherwise the caller skips the entry (== no match).
+bool ReadPhdr(const Elf64_Phdr* p, Elf64_Phdr& out) {
+#ifdef _WIN32
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery(p, &mbi, sizeof(mbi)) == 0) return false;
+    if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) return false;
+    std::memcpy(&out, p, sizeof(out));
+    return true;
+#else
+    std::memcpy(&out, p, sizeof(out));
+    return true;
+#endif
+}
+}
+
 int APS5_VABI __elf_phdr_match_addr_nid_postfix(dl_phdr_info* phdrInfo, void* addr) {
     if (phdrInfo == nullptr) throw std::invalid_argument("__elf_phdr_match_addr: phdr_info is null");
     const auto address = reinterpret_cast<std::uintptr_t>(addr);
     for (std::uint16_t i = 0; i < phdrInfo->dlpi_phnum; ++i) {
-        const Elf64_Phdr& header = phdrInfo->dlpi_phdr[i];
+        Elf64_Phdr header{};
+        if (!ReadPhdr(&phdrInfo->dlpi_phdr[i], header)) continue;
         if (header.p_type != PT_LOAD || (header.p_flags & PF_X) == 0) continue;
         const std::uintptr_t begin = phdrInfo->dlpi_addr + header.p_vaddr;
         if (begin <= address && address + sizeof(addr) < begin + header.p_memsz) return 1;

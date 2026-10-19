@@ -49,6 +49,10 @@ bool g_graph = false;
 bool g_maintenance8 = false;
 bool g_robust2 = false;
 bool g_code = false;
+// --emit-materialized-spirv <dir>: scratch artifact export only. Writes the SPIR-V that the
+// materialize path actually produced, into <dir>, when and only when materialization succeeded.
+// Normal argv and recompile semantics are unchanged when the option is not given.
+std::string g_materializedSpirvDir;
 
 bool Replay(const char* path) {
     auto request = ShaderRecompiler::RequestSerializer{}.Deserialize(ReadText(path));
@@ -137,6 +141,18 @@ bool Replay(const char* path) {
                 phase = "materialize";
                 const auto result = invocation->Materialize(*capture);
                 std::printf("  materialized: %zu SPIR-V words\n", result->spirv.size());
+                if (!g_materializedSpirvDir.empty()) {
+                    std::string name(path);
+                    name = name.substr(name.find_last_of("/\\") + 1) + ".materialized.spv";
+                    name = g_materializedSpirvDir + "/" + name;
+                    std::ofstream file(name, std::ios::binary);
+                    file.write(reinterpret_cast<const char*>(result->spirv.data()), static_cast<std::streamsize>(result->spirv.size() * sizeof(result->spirv[0])));
+                    if (!file) {
+                        std::printf("  could not write %s\n", name.c_str());
+                        return false;
+                    }
+                    std::printf("  materialized SPIR-V -> %s (%zu words)\n", name.c_str(), result->spirv.size());
+                }
             }
             return true;
         } catch (const std::exception& error) {
@@ -184,7 +200,7 @@ bool Replay(const char* path) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "usage: agc_shader_replay [--dis] [--asm] [--cfg] [--mem] [--spv] [--prepare] [--materialize] [--code] [--maintenance8] [--robust2] <shader.req>...\n  the driver writes shader_<address>.req files when APS5_DUMP_SHADERS is set\n");
+        std::fprintf(stderr, "usage: agc_shader_replay [--dis] [--asm] [--cfg] [--mem] [--spv] [--prepare] [--materialize] [--emit-materialized-spirv <dir>] [--code] [--maintenance8] [--robust2] <shader.req>...\n  the driver writes shader_<address>.req files when APS5_DUMP_SHADERS is set\n");
         return 2;
     }
     int failures = 0;
@@ -227,6 +243,14 @@ int main(int argc, char** argv) {
         }
         if (std::string(argv[i]) == "--spv") {
             g_spirv = true;
+            continue;
+        }
+        if (std::string(argv[i]) == "--emit-materialized-spirv") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "--emit-materialized-spirv needs a directory\n");
+                return 2;
+            }
+            g_materializedSpirvDir = argv[++i];
             continue;
         }
         try {

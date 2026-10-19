@@ -1,4 +1,6 @@
 #include "prx/libkernel/Semaphore/include/Semaphore.hpp"
+#include "prx/libkernel/Pthread/include/JobDiag.hpp"
+#include "prx/libc/include/general/LogMacros.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
 #include <chrono>
 
@@ -19,10 +21,12 @@ int APS5_VABI sceKernelCreateSema(KernelSema* sem, const char* name, uint32_t at
  }
 
  *sem = new KernelSemaPrivate(init, max, std::string(name), attr == 1);
+ if (aps5::jobdiag::DiagEnabled()) { char e[64]; std::snprintf(e, sizeof(e), "init=%d max=%d", init, max); aps5::jobdiag::Event("sema-create", reinterpret_cast<std::uintptr_t>(*sem), e); }
  return KERNEL_SEMA_OK;
 }
 
 int APS5_VABI sceKernelPollSema(KernelSema sem, int need) {
+    APS5_TRACE("sceKernelPollSema", (uintptr_t)sem);
  if (sem == nullptr || need <= 0) {
   APS5_INVALID_ARG_EX;
  }
@@ -36,6 +40,7 @@ int APS5_VABI sceKernelPollSema(KernelSema sem, int need) {
 }
 
 int APS5_VABI sceKernelSignalSema(KernelSema sem, int count) {
+    APS5_TRACE("sceKernelSignalSema", (uintptr_t)sem);
  if (sem == nullptr || count < 0) {
   APS5_INVALID_ARG_EX;
  }
@@ -45,17 +50,21 @@ int APS5_VABI sceKernelSignalSema(KernelSema sem, int count) {
   return SCE_KERNEL_ERROR_EINVAL;
  }
  sem->tokenCount += count;
+ if (aps5::jobdiag::DiagEnabled()) { char e[64]; std::snprintf(e, sizeof(e), "+%d -> %d", count, sem->tokenCount); aps5::jobdiag::Event("sema-signal", reinterpret_cast<std::uintptr_t>(sem), e); }
  sem->condition.NotifyAll();
  return KERNEL_SEMA_OK;
 }
 
 int APS5_VABI sceKernelWaitSema(KernelSema sem, int need, KernelUseconds* time) {
+    APS5_TRACE("sceKernelWaitSema", (uintptr_t)sem);
+    aps5::jobdiag::NoteLastWait("sema", (uintptr_t)sem);
  if (sem == nullptr || need <= 0) {
   APS5_INVALID_ARG_EX;
  }
 
  std::unique_lock<std::mutex> lock(sem->mutex);
  const std::uint64_t generation = sem->cancelGeneration;
+ if (aps5::jobdiag::DiagEnabled()) { char e[80]; std::snprintf(e, sizeof(e), "need=%d have=%d to=%d", need, sem->tokenCount, time ? static_cast<int>(*time) : -1); aps5::jobdiag::Event("sema-wait", reinterpret_cast<std::uintptr_t>(sem), e); }
  ++sem->waiterCount;
  ++sem->cancelableCount;
  struct WaiterGuard {

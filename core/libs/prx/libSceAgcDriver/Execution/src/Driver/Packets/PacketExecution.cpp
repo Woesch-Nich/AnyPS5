@@ -11,12 +11,21 @@
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Eq/include/Event.hpp"
 #include <cstdlib>
+#include <windows.h>
 #include <functional>
 #include <shared_mutex>
 
 namespace AgcDriver::DriverDetail {
 
 namespace {
+const bool kFlipTracePkt = std::getenv("APS5_TRACE_FLIP") != nullptr;
+unsigned flipTid() {
+#ifdef _WIN32
+    return ::GetCurrentThreadId();
+#else
+    return 0;
+#endif
+}
 
 bool orderedFills() {
     static const bool ordered = std::getenv("APS5_PIPELINE_DRAIN_FILLS") == nullptr;
@@ -40,7 +49,7 @@ bool keepsDrawPipeline(std::span<const std::uint32_t> packet, std::uint32_t head
     }
 }
 
-}
+} // namespace
 
 template <typename TWork>
 void Driver::timed(double WorkerProfile::*bucket, TWork&& work) {
@@ -169,6 +178,7 @@ void Driver::execute(const Submission& submission) {
         const auto packet = std::span(submission.commands).subspan(cursor, count);
         const auto opcode = (header >> 8u) & 0xffu;
         auto nextCursor = cursor + count;
+        if (kFlipTracePkt && submission.queue == 0) std::fprintf(stderr, "[flip] pkt serial=%llu off=%zu op=%02x %s tid=0x%x\n", static_cast<unsigned long long>(submission.serial), cursor, opcode, Pm4::Name(header).c_str(), flipTid());
         if (APS5_ENABLE_TIMING_LOG && submission.queue == 0 && pendingFrameTiming == nullptr) includeTimingSubmission(submission, false);
         PerformanceContext timingContext(submission.queue == 0 ? pendingFrameTiming.get() : FrameTiming::Async());
         PerformanceTimer timing("Driver.Packet");

@@ -1,4 +1,5 @@
 #include <cstdint>
+#include "prx/libc/include/general/CallCount.hpp"
 #include <cstddef>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
@@ -9,6 +10,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include "prx/libSceSystemService/SystemService.hpp"
 
 static constexpr int SCE_APP_CONTENT_ERROR_PARAMETER = static_cast<int>(0x80D90002);
 static constexpr int SCE_APP_CONTENT_ERROR_BUSY = static_cast<int>(0x80D90003);
@@ -56,40 +58,48 @@ static void ClearDirectory(const std::filesystem::path& directory) {
 extern "C" {
 
 int APS5_VABI sceAppContentAddcontMount(uint32_t service_label, const NpUnifiedEntitlementLabel* entitlement_label, AppContentMountPoint* mount_point) {
+    APS5_A55_BEGIN("sceAppContentAddcontMount");
  (void)service_label;
  if (!entitlement_label || !mount_point) return SCE_APP_CONTENT_ERROR_PARAMETER;
- return SCE_APP_CONTENT_ERROR_NOT_FOUND;
+ return APS5_A55_END(SCE_APP_CONTENT_ERROR_NOT_FOUND);
 }
 
 int APS5_VABI sceAppContentAddcontUnmount(const AppContentMountPoint* mount_point) {
+    APS5_A55_BEGIN("sceAppContentAddcontUnmount");
  if (!mount_point) return SCE_APP_CONTENT_ERROR_PARAMETER;
- return SCE_APP_CONTENT_ERROR_NOT_FOUND;
+ return APS5_A55_END(SCE_APP_CONTENT_ERROR_NOT_FOUND);
 }
 
 int APS5_VABI sceAppContentGetAddcontInfo(uint32_t service_label, const NpUnifiedEntitlementLabel* entitlement_label, AppContentAddcontInfo* info) {
+    APS5_A55_BEGIN("sceAppContentGetAddcontInfo");
     (void)service_label;
     if (!entitlement_label || !info) return SCE_APP_CONTENT_ERROR_PARAMETER;
-    return SCE_APP_CONTENT_ERROR_DRM_NO_ENTITLEMENT;
+    return APS5_A55_END(SCE_APP_CONTENT_ERROR_DRM_NO_ENTITLEMENT);
 }
 
 int APS5_VABI sceAppContentGetAddcontInfoList(uint32_t service_label, AppContentAddcontInfo* list, uint32_t list_num, uint32_t* hit_num) {
+    APS5_A55_BEGIN("sceAppContentGetAddcontInfoList");
     (void)service_label;
     if ((!list || list_num == 0) && !hit_num) return SCE_APP_CONTENT_ERROR_PARAMETER;
     if (hit_num) *hit_num = 0;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceAppContentAppParamGetInt(uint32_t param_id, int32_t* value) {
+    APS5_A55_BEGIN("sceAppContentAppParamGetInt");
     if (!value) return SCE_APP_CONTENT_ERROR_PARAMETER;
     switch (param_id) {
     case APPPARAM_ID_SKU_FLAG:
         *value = SKU_FLAG_FULL;
-        return 0;
+        return APS5_A55_END(0);
     case 1: case 2: case 3: case 4:
+        // Real PS5: id N = userDefinedParamN = getter index N-1 (upstream mapping; the a240
+        // version only mapped id 1 and hardcoded id 2-5 to 0, which the upstream GuestAppContent
+        // test (expects id2->-7, id4->2147483647) fails. A20 fix + #A260: id 1 -> getter(0)).
         *value = GetAppUserDefinedParam_nid_postfix(param_id - 1);
-        return 0;
+        return APS5_A55_END(0);
     default:
-        return SCE_APP_CONTENT_ERROR_PARAMETER;
+        return APS5_A55_END(SCE_APP_CONTENT_ERROR_PARAMETER);
     }
 }
 
@@ -103,12 +113,13 @@ int APS5_VABI sceAppContentDownloadDataFormat(const AppContentMountPoint* mount_
 }
 
 int APS5_VABI sceAppContentDownloadDataGetAvailableSpaceKb(const AppContentMountPoint* mount_point, size_t* available_space_kb) {
+    APS5_A55_BEGIN("sceAppContentDownloadDataGetAvailableSpaceKb");
     if (!available_space_kb) return SCE_APP_CONTENT_ERROR_PARAMETER;
     if (!mount_point || std::strncmp(mount_point->data, DOWNLOAD_MOUNT_POINT, sizeof(mount_point->data)) != 0) APS5_INVALID_ARG_EX;
     const std::uint64_t quotaKb = GetAppDownloadDataSizeMiB_nid_postfix() * 1024u;
     if (quotaKb == 0) {
         *available_space_kb = 0;
-        return 0;
+        return APS5_A55_END(0);
     }
     const auto directory = ResolvePath_nid_no_patch(DOWNLOAD_MOUNT_POINT);
     if (std::filesystem::create_directories(directory)) RecordWrittenPath_nid_no_patch(directory);
@@ -118,15 +129,20 @@ int APS5_VABI sceAppContentDownloadDataGetAvailableSpaceKb(const AppContentMount
     }
     const std::uint64_t hostKb = std::filesystem::space(directory).available / 1024u;
     *available_space_kb = static_cast<size_t>(std::min(quotaKb - std::min(quotaKb, usedKb), hostKb));
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceAppContentInitialize(const AppContentInitParam* init_param, AppContentBootParam* boot_param) {
+    APS5_A55_BEGIN("sceAppContentInitialize");
     (void)init_param;
     if (!boot_param) return SCE_APP_CONTENT_ERROR_PARAMETER;
     Temporary();
     std::memset(boot_param, 0, sizeof(*boot_param));
-    return 0;
+    // Real PS5 posts an entitlement-update event to system service when app
+
+    // Port of KytyPS5 62643c3424 (AppContentInitialize -> NotifyEntitlementUpdate).
+    Aps5SystemService_PostEvent_nid_postfix(SYSTEM_SERVICE_EVENT_ENTITLEMENT_UPDATE);
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceAppContentTemporaryDataFormat(const AppContentMountPoint* mountPoint) {

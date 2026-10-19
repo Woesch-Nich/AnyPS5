@@ -1,8 +1,25 @@
 #include <cstdio>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+namespace {
+const bool kFlipTrace = [] { return std::getenv("APS5_TRACE_FLIP") != nullptr; }();
+double flipMs() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+unsigned flipTid() {
+#ifdef _WIN32
+    return ::GetCurrentThreadId();
+#else
+    return 0;
+#endif
+}
+}
 
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
@@ -121,6 +138,7 @@ void APS5_VABI sceVideoOutAddBufferAttributeOption(VideoOutBufferAttribute2* att
 }
 
 int APS5_VABI sceVideoOutRegisterBuffers2(int handle, int setIndex, int bufferIndexStart, const VideoOutBuffers* buffers, int bufferNum, const VideoOutBufferAttribute2* attribute, int category, void* option) try {
+    if (kFlipTrace) std::fprintf(stderr, "[flip] api sceVideoOutRegisterBuffers2 handle=%d set=%d start=%d num=%d cat=%d tid=0x%x\n", handle, setIndex, bufferIndexStart, bufferNum, category, flipTid());
     auto cfg = VideoOutDriver::Get().GetConfig(handle);
     if (cfg == nullptr) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
@@ -272,6 +290,8 @@ int APS5_VABI sceVideoOutSubmitEopFlip(int handle, int index, int flipMode, int6
 }
 
 int APS5_VABI sceVideoOutSubmitFlip(int handle, int index, int flipMode, int64_t flipArg) try {
+    if (kFlipTrace) std::fprintf(stderr, "[flip] api sceVideoOutSubmitFlip start handle=%d index=%d mode=%d arg=%lld tid=0x%x\n", handle, index, flipMode, static_cast<long long>(flipArg), flipTid());
+    const auto start = flipMs();
     auto cfg = VideoOutDriver::Get().GetConfig(handle);
     if (cfg == nullptr) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
@@ -293,7 +313,9 @@ int APS5_VABI sceVideoOutSubmitFlip(int handle, int index, int flipMode, int64_t
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_INDEX");
     }
     lock.unlock();
-    return VideoOutDriver::Get().SubmitFlip(handle, index, flipMode, flipArg);
+    const int result = VideoOutDriver::Get().SubmitFlip(handle, index, flipMode, flipArg);
+    if (kFlipTrace) std::fprintf(stderr, "[flip] api sceVideoOutSubmitFlip end handle=%d index=%d result=%d took=%.1f ms tid=0x%x\n", handle, index, result, flipMs() - start, flipTid());
+    return result;
 } catch (const ProcessShutdown&) {
     LibcAwaitExit_nid_postfix();
 }

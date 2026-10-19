@@ -124,6 +124,14 @@ int APS5_VABI EqueueAddEvent_nid_postfix(KernelEqueue eq, const KernelEqueueEven
 int APS5_VABI EqueueTriggerEvent_nid_postfix(KernelEqueue eq, uintptr_t ident, int16_t filter, void* triggerData);
 int APS5_VABI EqueueDeleteEvent_nid_postfix(KernelEqueue eq, uintptr_t ident, int16_t filter);
 
-}
+} // extern "C"
+
+namespace aps5 {
+namespace ampr {
+void AmprRegister(KernelEqueue eq, uint32_t ident);
+void AmprUnregister(KernelEqueue eq, uint32_t ident);
+int AmprPostAll(uint64_t data);
+} // namespace ampr
+} // namespace aps5
 
 #endif

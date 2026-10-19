@@ -1,5 +1,8 @@
 #include <cstdint>
 #include <cstddef>
+#include <cstring>
+#include <cstdlib>
+#include <cstdio>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
@@ -518,8 +521,17 @@ void APS5_VABI sceKernelDebugRaiseException(int c1, int c2) {
   APS5_LOG_OUT("sceKernelDebugRaiseException c1=%d c2=%d", c1, c2);
 }
 
+// A33: instrumented. Log c1/c2 + the caller return address + thread id. A
+// _Unwind_Backtrace attempt was tried and REGRESSED the boot (unwinding
+// double-faults because the raise fires mid-exception), so keep it minimal.
+// (The C++ FATAL handler already prints the full frame-pointer chain when a
+// raise escapes, which is where the real caller chain comes from — see
+
 void APS5_VABI sceKernelDebugRaiseExceptionOnReleaseMode(int c1, int c2) {
-  APS5_LOG_OUT("sceKernelDebugRaiseExceptionOnReleaseMode c1=%d c2=%d", c1, c2);
+  void* ra = __builtin_return_address(0);
+  APS5_LOG_OUT("RaiseExcRelease tid=%p c1=0x%x c2=0x%x ra0=0x%llx",
+               (void*)pthread_self(), (unsigned)c1, (unsigned)c2,
+               (unsigned long long)(uintptr_t)ra);
 }
 
 }

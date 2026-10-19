@@ -99,9 +99,20 @@ bool IsRuntimeUniformOp(IrOpcode opcode) {
         case IrOpcode::LogicalNot:
         case IrOpcode::FPOrdLessThanEqual32:
         case IrOpcode::FPOrdGreaterThanEqual32:
+        case IrOpcode::FPUnordGreaterThanEqual32:
         case IrOpcode::FPIsNan32:
         case IrOpcode::FPMul32:
-        case IrOpcode::FPTrunc32: return true;
+        case IrOpcode::FPTrunc32:
+        // #A134: pure data transforms — same runtime-value semantics as the rest
+
+        case IrOpcode::FPMad32:
+        case IrOpcode::FPMax32:
+        case IrOpcode::FPRecip32:
+        case IrOpcode::FPSaturate32:
+        case IrOpcode::FindILsb32:
+        case IrOpcode::CompositeConstructU32x4:
+        case IrOpcode::Ballot:
+        case IrOpcode::CompositeExtractU32x4: return true;
         default: return false;
     }
 }

@@ -5,8 +5,10 @@
 #include <array>
 #include <bit>
 #include <cstdio>
+#include <cstdlib>
 #include <initializer_list>
 #include <map>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -176,6 +178,12 @@ struct BoundedJumpTable {
     ControlFlowGraph::CodeTableLoad load;
     std::vector<std::uint32_t> targets;
     std::uint32_t firstProgramCounter = 0;
+    // Index provenance for the FF1/gate bound proof (#A359): the clamping `SMinU32`
+    // instruction index, the register the dispatch index is carried in, and the number
+    // of selectable entries below the default one.
+    std::uint32_t boundIndex = 0;
+    std::uint32_t indexRegister = NoScalarRegister;
+    std::uint32_t maximum = 0;
 };
 
 bool sameRegister(const RdnaOperand& first, const RdnaOperand& second) {
@@ -243,6 +251,9 @@ bool resolveJumpTable(const RdnaProgram& program, std::uint32_t index, BoundedJu
         if ((table & 3u) != 0u || table > program.code.size_bytes() || byteCount > program.code.size_bytes() - table) return false;
         result.load.programCounter = load.programCounter;
         result.firstProgramCounter = bound.programCounter;
+        result.boundIndex = loadIndex - 5u;
+        result.indexRegister = scalarIndex(load.source1);
+        result.maximum = maximum;
         for (std::uint32_t entry = 0; entry <= maximum; ++entry) {
             const auto word = static_cast<std::size_t>(table / 4u) + entry * 2u;
             const std::uint64_t value = program.code[word] | (static_cast<std::uint64_t>(program.code[word + 1u]) << 32u);
@@ -350,6 +361,9 @@ bool resolveDwordJumpTable(const RdnaProgram& program, std::uint32_t index, Boun
     BoundedJumpTable resolved;
     resolved.load.programCounter = load.programCounter;
     resolved.firstProgramCounter = first.programCounter;
+    resolved.boundIndex = boundIndex;
+    resolved.indexRegister = offsetReg;
+    resolved.maximum = maximum;
     for (std::uint32_t entry = 0; entry <= maximum; ++entry) {
         const auto value = program.code[static_cast<std::size_t>(table / 4) + entry];
         const auto target = base - static_cast<std::int64_t>(value);
@@ -987,6 +1001,477 @@ std::vector<SwappcCall> analyzeSwappcCalls(const RdnaProgram& program, const Swa
     return calls;
 }
 
+bool writesScc(const RdnaInstruction& instruction) {
+    return instruction.destination.kind == RdnaOperandKind::Scc || instruction.destination2.kind == RdnaOperandKind::Scc;
+}
+
+bool immediateZero(const RdnaOperand& operand) {
+    std::uint32_t value = 0;
+    return isImmediate(operand, value) && value == 0u;
+}
+
+void intersectSorted(std::vector<std::uint32_t>& target, const std::vector<std::uint32_t>& other) {
+    std::vector<std::uint32_t> out;
+    std::set_intersection(target.begin(), target.end(), other.begin(), other.end(), std::back_inserter(out));
+    target = std::move(out);
+}
+
+// Dominator sets over the raw block graph, restricted to blocks reachable from entry.
+// Structurizer computes dominance later; the gate proof needs it here, so this is the
+// same iterative predecessor intersection over the unstructured blocks. Sets are
+// self-inclusive (D(n) = {n} union of the intersection over predecessors), so an
+// immediate predecessor dominates its successor.
+std::vector<std::vector<std::uint32_t>> rawDominators(const std::vector<BasicBlock>& blocks, std::uint32_t entry) {
+    std::vector<bool> reachable(blocks.size(), false);
+    std::vector<std::uint32_t> pending{entry};
+    reachable[entry] = true;
+    while (!pending.empty()) {
+        const auto id = pending.back();
+        pending.pop_back();
+        for (const auto successor : blocks[id].successors) {
+            if (successor < blocks.size() && !reachable[successor]) {
+                reachable[successor] = true;
+                pending.push_back(successor);
+            }
+        }
+    }
+
+    std::vector<std::uint32_t> reachableIds;
+    for (std::uint32_t id = 0; id < blocks.size(); ++id) {
+        if (reachable[id]) reachableIds.push_back(id);
+    }
+
+    std::vector<std::vector<std::uint32_t>> dom(blocks.size());
+    for (const auto id : reachableIds) {
+        dom[id] = id == entry ? std::vector<std::uint32_t>{entry} : reachableIds;
+    }
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const auto id : reachableIds) {
+            if (id == entry) continue;
+            std::vector<std::uint32_t> intersection;
+            bool firstPredecessor = true;
+            for (const auto predecessor : blocks[id].predecessors) {
+                if (predecessor >= blocks.size() || !reachable[predecessor]) continue;
+                if (firstPredecessor) {
+                    intersection = dom[predecessor];
+                    firstPredecessor = false;
+                    continue;
+                }
+                intersectSorted(intersection, dom[predecessor]);
+            }
+            // D(n) = {n} union of the intersection over its predecessors.
+            auto next = intersection;
+            if (std::find(next.begin(), next.end(), id) == next.end()) next.push_back(id);
+            std::sort(next.begin(), next.end());
+            if (next != dom[id]) {
+                dom[id] = std::move(next);
+                changed = true;
+            }
+        }
+    }
+    return dom;
+}
+
+std::uint32_t blockContainingPc(const std::vector<BasicBlock>& blocks, std::uint32_t programCounter) {
+    for (std::uint32_t id = 0; id < blocks.size(); ++id) {
+        if (blocks[id].startProgramCounter <= programCounter && programCounter < blocks[id].endProgramCounter) {
+            return id;
+        }
+    }
+    return InvalidControlFlowId;
+}
+
+// #A359/#A361 prototype. Proves that a bounded indirect dispatch never selects its last
+// (default) code-table entry:
+//   * the dispatch index is `SMinU32(scanned, maximum)` computed inside the dispatch block
+//     itself, with `maximum >= 32`, so a scan result in 0..31 is strictly below the last
+//     entry;
+//   * a `SCmpLgU32 scc, 0, mask` + `SCbranchScc0` gate dominates the dispatch block, its
+//     taken (`mask == 0`) arm cannot reach the dispatch block without passing the gate
+//     again, and its fallthrough arm does reach it, so every path entering the dispatch
+//     passed a `mask != 0` test;
+//   * clobber is judged by order on the path, not by program order: the bound is the consumer
+//     of the scanned register and the scan is the consumer of the mask, so a write only matters
+//     when it happens *before* that consumer. On every path into the dispatch the scanned
+//     register is written before the bound exactly once, by a single `SFf1I32B32 scanned, mask`
+//     whose block dominates the dispatch, and the mask is never written between the gate test
+//     and that scan. A write after the bound (a later dispatch re-deriving the same register)
+//     does not change the value this bound already read;
+//   * the mask definition dominating the scan is not a constant immediate, so the nonzero
+//     fact is a runtime fact tested by the gate rather than a folded value.
+// Recognition is path-aware, not a linear instruction scan: the bit scan may live in any
+// block of the gate-to-dispatch region, including across intervening branches. A loop latch
+// on the backedge into the gate is allowed because it is not on any gate-to-dispatch path,
+// so each iteration re-tests the carried mask before the scan. Any unproved shape keeps
+// every edge.
+bool provesDefaultEntryUnreachable(
+    const RdnaProgram& program,
+    const std::vector<BasicBlock>& blocks,
+    std::uint32_t branchBlock,
+    const BoundedJumpTable& table) {
+    const bool trace = std::getenv("APS5_PRUNE_DEBUG") != nullptr;
+    auto reject = [&](const char* why) {
+        if (trace) {
+            std::fprintf(stderr, "prune: branch block id=%u pc=0x%x..0x%x rejected: %s\n",
+                         branchBlock, blocks[branchBlock].startProgramCounter,
+                         blocks[branchBlock].endProgramCounter, why);
+        }
+        return false;
+    };
+    // Successor edges are read from the terminators rather than `BasicBlock::successors`,
+    // which is not populated for every block kind, so reachability cannot under-report.
+    // An unsupported terminator is treated as reaching, which only ever weakens the proof.
+    auto successorsOf = [&](std::uint32_t id) {
+        std::vector<std::uint32_t> out;
+        const auto& term = blocks[id].terminator;
+        switch (term.kind) {
+            case TerminatorKind::Branch:
+                if (term.trueBlock != InvalidControlFlowId) out.push_back(term.trueBlock);
+                break;
+            case TerminatorKind::ConditionalBranch:
+                if (term.trueBlock != InvalidControlFlowId) out.push_back(term.trueBlock);
+                if (term.falseBlock != InvalidControlFlowId) out.push_back(term.falseBlock);
+                break;
+            case TerminatorKind::IndirectBranch:
+                for (const auto target : term.indirectTargets) out.push_back(target);
+                break;
+            case TerminatorKind::Return:
+            case TerminatorKind::Unsupported:
+                break;
+        }
+        return out;
+    };
+    auto reaches = [&](std::uint32_t from, std::uint32_t target) {
+        std::vector<bool> seen(blocks.size(), false);
+        std::vector<std::uint32_t> pending{from};
+        while (!pending.empty()) {
+            const auto id = pending.back();
+            pending.pop_back();
+            if (id == target) return true;
+            if (id >= blocks.size() || seen[id]) continue;
+            seen[id] = true;
+            if (blocks[id].terminator.kind == TerminatorKind::Unsupported) return true;
+            for (const auto successor : successorsOf(id)) pending.push_back(successor);
+        }
+        return false;
+    };
+    // Reachability that stops at `barrier`, so a loop back through the gate does not count
+    // as the gate's taken arm reaching the dispatch: that arm has to be re-tested first.
+    auto reachesWithoutReentering = [&](std::uint32_t from, std::uint32_t target, std::uint32_t barrier) {
+        std::vector<bool> seen(blocks.size(), false);
+        std::vector<std::uint32_t> pending{from};
+        while (!pending.empty()) {
+            const auto id = pending.back();
+            pending.pop_back();
+            if (id == target) return true;
+            if (id == barrier) continue;
+            if (id >= blocks.size() || seen[id]) continue;
+            seen[id] = true;
+            if (blocks[id].terminator.kind == TerminatorKind::Unsupported) return true;
+            for (const auto successor : successorsOf(id)) pending.push_back(successor);
+        }
+        return false;
+    };
+    if (trace) {
+        const auto& bound = program.instructions[table.boundIndex];
+        std::fprintf(stderr,
+                     "prune: candidate branch block id=%u pc=0x%x..0x%x entries=%u maximum=%u "
+                     "indexReg=%u boundIndex=%u boundPc=0x%x boundOp=0x%x\n",
+                     branchBlock, blocks[branchBlock].startProgramCounter,
+                     blocks[branchBlock].endProgramCounter,
+                     static_cast<unsigned>(table.targets.size()), table.maximum, table.indexRegister,
+                     table.boundIndex, bound.programCounter, static_cast<unsigned>(bound.op));
+    }
+    if (table.targets.size() < 2u || table.maximum < 32u) return reject("table too small or unbounded");
+    if (table.indexRegister == NoScalarRegister) return reject("no index register");
+    if (table.boundIndex == 0u || table.boundIndex >= program.instructions.size()) return reject("no bound instruction");
+
+    const auto& bound = program.instructions[table.boundIndex];
+    if (bound.op != RdnaOpcode::SMinU32) return reject("bound is not SMinU32");
+    std::uint32_t scanned = NoScalarRegister;
+    std::uint32_t maximum = 0;
+    if (isImmediate(bound.source1, maximum) && maximum == table.maximum) {
+        scanned = scalarIndex(bound.source0);
+    } else if (isImmediate(bound.source0, maximum) && maximum == table.maximum) {
+        scanned = scalarIndex(bound.source1);
+    } else {
+        return reject("bound immediate does not match the table maximum");
+    }
+    if (scanned == NoScalarRegister) return reject("bound does not scan a scalar register");
+
+    // The clamped index must be computed inside the dispatch block, so the value used for
+    // the table offset is the one bounded by this proof.
+    const auto boundBlock = blockContainingPc(blocks, bound.programCounter);
+    if (boundBlock != branchBlock) return reject("bound is not inside the dispatch block");
+
+    const auto dom = rawDominators(blocks, 0u);
+    // `rawDominators` sets are self-inclusive, so a block dominates itself and an
+    // immediate predecessor dominates its successor.
+    auto dominates = [&](std::uint32_t blocker, std::uint32_t target) {
+        return blocker == target || std::binary_search(dom[target].begin(), dom[target].end(), blocker);
+    };
+    // Discovered while walking the gate-to-dispatch region, so a bit scan living in any
+    // block of that region (across branches) is recognised.
+    std::uint32_t mask = NoScalarRegister;
+
+    for (std::uint32_t gate = 0u; gate < blocks.size(); ++gate) {
+        if (gate == branchBlock) continue;
+        mask = NoScalarRegister;
+        const auto& gateBlock = blocks[gate];
+        if (gateBlock.instructionBegin == gateBlock.instructionEnd) continue;
+        if (gateBlock.terminator.kind != TerminatorKind::ConditionalBranch ||
+            gateBlock.terminator.condition != BranchCondition::SccZero) {
+            continue;
+        }
+        if (program.instructions[gateBlock.instructionEnd - 1u].op != RdnaOpcode::SCbranchScc0) continue;
+        if (!dominates(gate, branchBlock)) {
+            if (trace) std::fprintf(stderr, "prune: gate id=%u pc=0x%x does not dominate branch\n", gate, gateBlock.startProgramCounter);
+            continue;
+        }
+        // Joint-satisfiability guard: the mask==0 arm must not reach the dispatch block
+        // without passing the gate again, so every path entering the dispatch took the
+        // gate's nonzero arm on its last gate visit.
+        if (gateBlock.terminator.trueBlock != InvalidControlFlowId &&
+            reachesWithoutReentering(gateBlock.terminator.trueBlock, branchBlock, gate)) {
+            if (trace) {
+                std::fprintf(stderr, "prune: gate id=%u pc=0x%x mask==0 arm id=%u still reaches the dispatch\n",
+                             gate, gateBlock.startProgramCounter, gateBlock.terminator.trueBlock);
+            }
+            continue;
+        }
+        if (gateBlock.terminator.falseBlock == InvalidControlFlowId ||
+            !reaches(gateBlock.terminator.falseBlock, branchBlock)) {
+            if (trace) {
+                std::fprintf(stderr, "prune: gate id=%u pc=0x%x nonzero arm does not reach the dispatch\n",
+                             gate, gateBlock.startProgramCounter);
+            }
+            continue;
+        }
+
+        bool tested = false;
+        std::uint32_t comparePc = 0;
+        std::size_t compareIndex = 0;
+        for (auto index = gateBlock.instructionBegin; index + 1u < gateBlock.instructionEnd; ++index) {
+            const auto& compare = program.instructions[index];
+            if (compare.op != RdnaOpcode::SCmpLgU32 || compare.destination.kind != RdnaOperandKind::Scc) continue;
+            // The tested mask is the non-immediate operand; either operand order is accepted.
+            if (immediateZero(compare.source0)) {
+                if (compare.source1.kind != RdnaOperandKind::ScalarRegister) continue;
+                mask = scalarIndex(compare.source1);
+            } else if (immediateZero(compare.source1)) {
+                if (compare.source0.kind != RdnaOperandKind::ScalarRegister) continue;
+                mask = scalarIndex(compare.source0);
+            } else {
+                continue;
+            }
+            if (mask == NoScalarRegister || mask == scanned) continue;
+            tested = true;
+            comparePc = compare.programCounter;
+            compareIndex = index;
+            for (auto after = index + 1u; after < gateBlock.instructionEnd; ++after) {
+                if (writesScc(program.instructions[after]) || writesScalar(program.instructions[after], mask) ||
+                    writesScalar(program.instructions[after], scanned)) {
+                    tested = false;
+                    break;
+                }
+            }
+            if (tested) break;
+        }
+        if (!tested) {
+            if (trace) {
+                std::fprintf(stderr, "prune: gate id=%u pc=0x%x..0x%x has no carried nonzero test of mask %u\n",
+                             gate, gateBlock.startProgramCounter, gateBlock.endProgramCounter, mask);
+            }
+            continue;
+        }
+        if (mask == NoScalarRegister || mask == scanned) {
+            if (trace) std::fprintf(stderr, "prune: gate id=%u test register is not a separate mask\n", gate);
+            continue;
+        }
+        if (trace) {
+            std::fprintf(stderr, "prune: gate id=%u pc=0x%x testPc=0x%x mask=%u dominates branch; walking gate-to-branch\n",
+                         gate, gateBlock.startProgramCounter, comparePc, mask);
+        }
+
+        std::vector<std::uint32_t> pending{branchBlock};
+        std::vector<bool> seen(blocks.size(), false);
+        std::uint32_t regionBlocks = 0u;
+        bool clean = true;
+        const char* why = "none";
+        struct WriteEvent {
+            std::uint32_t block;
+            std::size_t index;
+        };
+        std::vector<WriteEvent> maskWrites;
+        std::vector<WriteEvent> indexWrites;
+        while (!pending.empty()) {
+            const auto id = pending.back();
+            pending.pop_back();
+            if (id == gate) continue;
+            if (seen[id]) continue;
+            seen[id] = true;
+            if (!dominates(gate, id)) {
+                clean = false;
+                why = "a path reaches the branch without the gate";
+                break;
+            }
+            const auto& block = blocks[id];
+            if (block.terminator.kind == TerminatorKind::Unsupported) {
+                clean = false;
+                why = "unsupported terminator inside the gate-to-branch region";
+                break;
+            }
+            ++regionBlocks;
+            for (auto index = block.instructionBegin; index < block.instructionEnd; ++index) {
+                const auto& instruction = program.instructions[index];
+                // The clamping bound is the index consumer, not a clobber.
+                if (index == table.boundIndex) continue;
+                if (writesScalar(instruction, mask)) maskWrites.push_back({id, index});
+                if (writesScalar(instruction, scanned)) indexWrites.push_back({id, index});
+            }
+            for (const auto predecessor : block.predecessors) pending.push_back(predecessor);
+        }
+        if (!clean) {
+            if (trace) std::fprintf(stderr, "prune: gate id=%u walk rejected: %s\n", gate, why);
+            mask = NoScalarRegister;
+            continue;
+        }
+        // Order on the path, not program order: the bound sits inside the dispatch block, so a
+        // write upstream of that block precedes it on every path, and inside the block only a
+        // write ahead of the bound does. Writes after the bound cannot clobber the value the
+        // bound already consumed.
+        auto beforeBound = [&](std::uint32_t id, std::size_t index) {
+            return id == branchBlock ? index < table.boundIndex : true;
+        };
+        std::optional<std::size_t> regionScan;
+        std::optional<std::uint32_t> scanBlock;
+        std::uint32_t indexWritesAfterBound = 0u;
+        for (const auto& write : indexWrites) {
+            if (!beforeBound(write.block, write.index)) {
+                ++indexWritesAfterBound;
+                continue;
+            }
+            const auto& instruction = program.instructions[write.index];
+            // Exactly one bit scan may produce the index before the bound, so a scan across an
+            // intervening branch is recognised while a second scan or any other definition is not.
+            if (instruction.op != RdnaOpcode::SFf1I32B32 || !isScalar(instruction.destination, scanned) ||
+                !isScalar(instruction.source0, mask)) {
+                clean = false;
+                why = "index register written before the bound by something other than the bit scan";
+                break;
+            }
+            if (regionScan) {
+                clean = false;
+                why = "bit scan appears twice before the bound";
+                break;
+            }
+            regionScan = write.index;
+            scanBlock = write.block;
+        }
+        if (!clean) {
+            if (trace) std::fprintf(stderr, "prune: gate id=%u walk rejected: %s\n", gate, why);
+            mask = NoScalarRegister;
+            continue;
+        }
+        if (!regionScan) {
+            if (trace) {
+                std::fprintf(stderr, "prune: gate id=%u walk found no bit scan of register %u before the bound\n", gate, scanned);
+            }
+            mask = NoScalarRegister;
+            continue;
+        }
+        const auto& scan = program.instructions[*regionScan];
+        if (!dominates(gate, *scanBlock)) {
+            if (trace) {
+                std::fprintf(stderr, "prune: scan pc=0x%x block=%u is not downstream of gate id=%u, so the mask is tested after it\n",
+                             scan.programCounter, *scanBlock, gate);
+            }
+            mask = NoScalarRegister;
+            continue;
+        }
+        if (!dominates(*scanBlock, branchBlock)) {
+            if (trace) {
+                std::fprintf(stderr, "prune: scan pc=0x%x block=%u does not dominate branch id=%u (branch preds=%zu succ=%zu)\n",
+                             scan.programCounter, *scanBlock, branchBlock, blocks[branchBlock].predecessors.size(),
+                             blocks[branchBlock].successors.size());
+                for (const auto predecessor : blocks[branchBlock].predecessors) {
+                    std::fprintf(stderr, "prune:   branch pred id=%u pc=0x%x..0x%x\n", predecessor,
+                                 blocks[predecessor].startProgramCounter, blocks[predecessor].endProgramCounter);
+                }
+                for (const auto dominator : dom[branchBlock]) {
+                    std::fprintf(stderr, "prune:   branch dom id=%u pc=0x%x..0x%x\n", dominator,
+                                 blocks[dominator].startProgramCounter, blocks[dominator].endProgramCounter);
+                }
+                std::fprintf(stderr, "prune:   branch dom count=%zu\n", dom[branchBlock].size());
+            }
+            mask = NoScalarRegister;
+            continue;
+        }
+        // A mask write only clobbers the value the scan reads when it lands before the scan.
+        // The definition the gate tested (in the gate block, at or ahead of the compare) and any
+        // write downstream of the scan are both harmless.
+        for (const auto& write : maskWrites) {
+            if (write.block == gate && write.index <= compareIndex) continue;
+            if (write.block == *scanBlock) {
+                // Same block: only a write behind the scan is harmless.
+                if (write.index > *regionScan) continue;
+            } else if (dominates(*scanBlock, write.block)) {
+                // Strictly downstream of the scan, so the value the scan read is untouched.
+                continue;
+            }
+            if (trace) {
+                std::fprintf(stderr, "prune: gate id=%u walk rejected: mask %u written before the bit scan at pc=0x%x\n",
+                             gate, mask, program.instructions[write.index].programCounter);
+            }
+            mask = NoScalarRegister;
+            clean = false;
+            break;
+        }
+        if (!clean) continue;
+        // The mask feeding the scan must come from a dominating runtime definition, not from
+        // a constant immediate folded by the caller.
+        bool anyDominatingMaskDef = false;
+        bool constantOnly = true;
+        std::uint32_t maskDefPc = 0u;
+        for (std::uint32_t index = 0u; index < program.instructions.size(); ++index) {
+            const auto& instruction = program.instructions[index];
+            if (!writesScalar(instruction, mask)) continue;
+            const auto defBlock = blockContainingPc(blocks, instruction.programCounter);
+            if (defBlock == InvalidControlFlowId || !dominates(defBlock, *scanBlock)) continue;
+            anyDominatingMaskDef = true;
+            maskDefPc = instruction.programCounter;
+            std::uint32_t constant = 0u;
+            if (!(instruction.op == RdnaOpcode::SMovB32 && isImmediate(instruction.source0, constant))) {
+                constantOnly = false;
+            }
+        }
+        if (!anyDominatingMaskDef) {
+            if (trace) std::fprintf(stderr, "prune: no dominating mask definition for mask %u\n", mask);
+            mask = NoScalarRegister;
+            continue;
+        }
+        if (constantOnly) {
+            if (trace) std::fprintf(stderr, "prune: mask %u definition at pc=0x%x is a constant\n", mask, maskDefPc);
+            mask = NoScalarRegister;
+            continue;
+        }
+        if (trace) {
+            std::fprintf(stderr,
+                         "prune: PROVED branch block id=%u drops entry %u (default pc=0x%x); gate id=%u pc=0x%x "
+                         "scan pc=0x%x block=%u mask=%u maskDefPc=0x%x bound pc=0x%x scan-before-bound=%d "
+                         "index writes after bound=%u region blocks=%u\n",
+                         branchBlock, table.maximum, table.targets.back(), gate, gateBlock.startProgramCounter,
+                         scan.programCounter, *scanBlock, mask, maskDefPc, bound.programCounter,
+                         scan.programCounter < bound.programCounter ? 1 : 0, indexWritesAfterBound, regionBlocks);
+        }
+        return true;
+    }
+    return reject("no dominating gate carries the nonzero fact");
+}
+
 BranchCondition conditionForOpcode(RdnaOpcode opcode) {
     switch (opcode) {
         case RdnaOpcode::SBranch: return BranchCondition::Always;
@@ -1558,6 +2043,39 @@ ControlFlowGraph GraphBuilder::Build(const RdnaProgram& program, const SwappcInf
             graph.fetchCallProgramCounter = program.instructions[call.callIndex].programCounter;
         }
     }
+    // #A359/#A361 prototype: a bounded dispatch may drop its default control edge only when
+    // the FF1/gate bound proof holds. Unproved dispatches keep every edge, and the pruning
+    // itself is OPT-IN: APS5_INDIRECT_DEFAULT_PRUNE=1 enables it. With the variable unset the
+    // graph is built exactly as production, so the prototype cannot change real captures.
+    std::vector<bool> pruneDefaultEntry(graph.blocks.size(), false);
+    const bool pruneTrace = std::getenv("APS5_PRUNE_DEBUG") != nullptr;
+    const char* pruneEnable = std::getenv("APS5_INDIRECT_DEFAULT_PRUNE");
+    if (pruneEnable != nullptr && std::string(pruneEnable) == "1") {
+        for (std::uint32_t id = 0; id < graph.blocks.size(); ++id) {
+            if (graph.blocks[id].terminator.kind != TerminatorKind::IndirectBranch) continue;
+            BoundedJumpTable table;
+            if (!resolveBoundedJumpTable(program, graph.blocks[id].instructionEnd - 1u, table)) {
+                if (pruneTrace) std::fprintf(stderr, "prune: branch block id=%u pc=0x%x has no bounded table\n", id, graph.blocks[id].startProgramCounter);
+                continue;
+            }
+            if (table.firstProgramCounter < graph.blocks[id].startProgramCounter) {
+                if (pruneTrace) std::fprintf(stderr, "prune: branch block id=%u pc=0x%x bound pc=0x%x is outside the branch block\n", id, graph.blocks[id].startProgramCounter, table.firstProgramCounter);
+                continue;
+            }
+            // The default entry must correspond to exactly one table entry, so pruning it
+            // cannot also remove an entry target that another index reaches.
+            if (std::count(table.targets.begin(), table.targets.end(), table.targets.back()) != 1) {
+                if (pruneTrace) std::fprintf(stderr, "prune: branch block id=%u default pc=0x%x is not a unique table entry\n", id, table.targets.back());
+                continue;
+            }
+            if (provesDefaultEntryUnreachable(program, graph.blocks, id, table)) {
+                pruneDefaultEntry[id] = true;
+            }
+        }
+    } else if (pruneTrace) {
+        std::fprintf(stderr, "prune: disabled (APS5_INDIRECT_DEFAULT_PRUNE not set to 1)\n");
+    }
+
     const auto originalSize = graph.blocks.size();
     for (std::uint32_t id = 0; id < originalSize; ++id) {
         const auto term = graph.blocks[id].terminator;
@@ -1578,6 +2096,24 @@ ControlFlowGraph GraphBuilder::Build(const RdnaProgram& program, const SwappcInf
             block.terminator.trueBlock = term.indirectTargets[entry];
             block.terminator.indirectPcSgpr = term.indirectPcSgpr;
             block.terminator.indirectTargetProgramCounters = {term.indirectTargetProgramCounters[entry]};
+            const bool lastRealEntry = pruneDefaultEntry[id] && entry + 2u == term.indirectTargets.size();
+            if (lastRealEntry) {
+                // Entry `maximum` is unreachable under the proved bound, so the last real
+                // comparison falls through to an empty unreachable block and the default
+                // comparison is not emitted. The code-table payload still holds every entry.
+                const auto dead = static_cast<std::uint32_t>(graph.blocks.size());
+                BasicBlock unreachable;
+                unreachable.id = dead;
+                unreachable.startProgramCounter = block.endProgramCounter;
+                unreachable.endProgramCounter = block.endProgramCounter;
+                unreachable.instructionBegin = block.instructionEnd;
+                unreachable.instructionEnd = block.instructionEnd;
+                unreachable.terminator.kind = TerminatorKind::Return;
+                graph.blocks.push_back(std::move(unreachable));
+                block.terminator.falseBlock = dead;
+                block.successors = {term.indirectTargets[entry], dead};
+                break;
+            }
             block.successors = {term.indirectTargets[entry]};
             if (!last) {
                 block.terminator.falseBlock = next;

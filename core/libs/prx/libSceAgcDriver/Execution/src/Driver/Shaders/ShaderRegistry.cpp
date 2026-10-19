@@ -16,6 +16,7 @@
 #include <chrono>
 #include <set>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdio>
 #include <cstddef>
 #include <cstdint>
@@ -37,9 +38,11 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include "Optimization/ShaderStageInputInfo.hpp"
 #include <spirv/unified1/spirv.hpp>
+#include <unordered_set>
 #include "RdnaDecoder/RdnaInstructionDecoder.hpp"
 
 namespace AgcDriver::DriverDetail {
@@ -1118,19 +1121,85 @@ bool AsyncRegistrationPrepare() {
     return !sync;
 }
 
+namespace {
+
+// request's stage, sourceHash, the image-resource instruction and descriptor, plus the
+// exception text. First 3 DISTINCT shaders only (by code hash); opt-out APS5_SHADER_FAIL_DUMP=0.
+constexpr std::size_t kShaderFailDumpLimit = 3;
+std::unordered_set<std::uint64_t>& ShaderFailDumpSeen() {
+    static std::unordered_set<std::uint64_t> seen;
+    return seen;
+}
+std::size_t& ShaderFailDumpCount() {
+    static std::size_t count = 0;
+    return count;
+}
+bool ShaderFailDumpEnabled() {
+    static const bool on = std::getenv("APS5_SHADER_FAIL_DUMP") == nullptr ||
+                           std::string(std::getenv("APS5_SHADER_FAIL_DUMP")) != "0";
+    return on;
+}
+const char* ShaderStageName(ShaderRecompiler::ShaderStage stage) {
+    switch (stage) {
+    case ShaderRecompiler::ShaderStage::Compute: return "Compute";
+    case ShaderRecompiler::ShaderStage::Fragment: return "Fragment";
+    case ShaderRecompiler::ShaderStage::Vertex: return "Vertex";
+    case ShaderRecompiler::ShaderStage::Mesh: return "Mesh";
+    case ShaderRecompiler::ShaderStage::Local: return "Local";
+    case ShaderRecompiler::ShaderStage::TessellationControl: return "TessControl";
+    case ShaderRecompiler::ShaderStage::TessellationEvaluation: return "TessEval";
+    default: return "Stage";
+    }
+}
+void DumpShaderFailure(const RegisteredPreparation& plan,
+                       const ShaderRecompiler::RecompileRequest& request,
+                       const std::string& exceptionText) {
+    if (!ShaderFailDumpEnabled()) return;
+    const std::uint64_t hash = ShaderRecompiler::RecompileCacheKey::HashCode(request.shader.code);
+    auto& seen = ShaderFailDumpSeen();
+    if (seen.size() >= kShaderFailDumpLimit || !seen.insert(hash).second) return;
+    auto& count = ShaderFailDumpCount();
+    ++count;
+    std::string out;
+    out.reserve(16384);
+    const auto hex = [](std::uint64_t v) {
+        char buffer[20];
+        std::snprintf(buffer, sizeof(buffer), "%llx", static_cast<unsigned long long>(v));
+        return std::string(buffer);
+    };
+    out += "=== [shaderfail #" + std::to_string(count) + "] " +
+           std::string(ShaderStageName(request.shader.stage)) +
+           " stage=0x" + hex(static_cast<std::uint32_t>(request.shader.stage)) +
+           " sourceHash=0x" + hex(hash) +
+           " code=0x" + hex(static_cast<std::uint64_t>(request.shader.codeAddress)) +
+           " hdr=0x" + hex(static_cast<std::uint64_t>(request.shader.headerAddress)) +
+           " codeWords=" + std::to_string(request.shader.code.size()) +
+           " hdrBytes=" + std::to_string(request.shader.header.size()) + "\n";
+    out += "    exception: " + exceptionText + "\n";
+    // a254: decoded program is not stored on RegisteredPreparation in this tree;
+    // the request/header/exception dump above is sufficient for failure analysis.
+    APS5_LOG_ERR("%s", out.c_str());
+}
+}  // namespace
+
 void PrepareRegisteredInBackground(std::shared_ptr<const ShaderSnapshot> snapshot, std::shared_ptr<RegisteredPreparation> plan) {
     const auto* preparedKey = snapshot->prepared.get();
     SubmitRegistrationPreparation([snapshot = std::move(snapshot), plan = std::move(plan)] {
         PerformanceContext timingContext(FrameTiming::Preparation());
         std::vector<PreparedShaders::Entry> entries;
         std::exception_ptr failure;
+        std::string failureText;
         try {
             entries = PrepareRegistered(*plan);
         } catch (const std::exception& error) {
+            failureText = error.what();
             APS5_LOG_ERR("Shader 0x%llx could not be prepared after registration: %s", static_cast<unsigned long long>(snapshot->codeAddress), error.what());
             failure = std::current_exception();
+            if (plan->request.has_value()) DumpShaderFailure(*plan, *plan->request, failureText);
         } catch (...) {
+            failureText = "(non-std exception)";
             failure = std::current_exception();
+            if (plan->request.has_value()) DumpShaderFailure(*plan, *plan->request, failureText);
         }
         auto& prepared = *snapshot->prepared;
         {

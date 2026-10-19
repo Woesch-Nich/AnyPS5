@@ -12,9 +12,14 @@ namespace ShaderRecompiler {
 struct ShaderInfo {
     std::uint32_t scratchDwords = 0;
     std::uint32_t sharedMemoryBytes = 0;
-    static constexpr std::uint32_t MaxImages = 64;
+    // The descriptor-web split emits one arm-copy image per distinct descriptor
+    // arm; a single source image can therefore fan out to many arm-copies, so the
+    // cap must headroom beyond one arm per source (64 sources -> up to 64 copies).
+    static constexpr std::uint32_t MaxImages = 128;
     static constexpr std::uint32_t MaxSamplers = 32;
-    static constexpr std::uint32_t MaxSampledPairs = 64;
+    // Arm-copies fan out one sampled pair per descriptor arm, so this needs the
+    // same headroom as MaxImages.
+    static constexpr std::uint32_t MaxSampledPairs = 128;
 
     std::vector<BufferResource> buffers;
     std::vector<ImageResource> images;

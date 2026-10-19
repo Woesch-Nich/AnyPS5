@@ -84,6 +84,31 @@ void require(bool condition, const char* reason) {
     if (!condition) throw std::runtime_error(std::string("Vulkan presentation: ") + reason);
 }
 
+const bool kFlipTraceVk = std::getenv("APS5_TRACE_FLIP") != nullptr;
+unsigned flipTid() { return ::GetCurrentThreadId(); }
+
+// APS5_DUMP_DISPATCH_RES=0xADDR: frame-1 compute forensics. Prints a light "seen" line for every
+// dispatch (confirms the frame-1 compute's real program address) and, when the program address
+// matches, one full resource dump (the guest ranges read/written, formats, non-zero content ratio,
+// lease state). Light enough not to shift the NULL-deref timing race.
+void DumpDispatchRes(const char* path, const Graphics::ShaderResources* resources, std::uint64_t programAddress, const char* groupsText, std::uint64_t arguments) {
+    static const std::uint64_t dumpResAddress = [] {
+        const char* value = std::getenv("APS5_DUMP_DISPATCH_RES");
+        if (value == nullptr) return std::uint64_t{0};
+        char* end = nullptr;
+        return std::strtoull(value, &end, 16);
+    }();
+    if (dumpResAddress == 0) return;
+    static std::atomic<bool> dumped{false};
+    std::fprintf(stderr, "[dispatch-res] %s seen 0x%llx groups=%s\n", path, static_cast<unsigned long long>(programAddress), groupsText);
+    if ((programAddress == dumpResAddress || (programAddress & 0xffffffffull) == dumpResAddress) && !dumped.exchange(true)) {
+        std::fprintf(stderr, "[dispatch-res] %s MATCH program 0x%llx groups=%s arguments=0x%llx holdsLease=%d\n",
+            path, static_cast<unsigned long long>(programAddress), groupsText, static_cast<unsigned long long>(arguments), resources->HoldsLease() ? 1 : 0);
+        std::fprintf(stderr, "[dispatch-res] %s\n", resources->Describe().c_str());
+    }
+    std::fflush(stderr);
+}
+
 bool CoreVulkanCapability(std::uint32_t capability) {
     switch (capability) {
         case spv::CapabilityMatrix:
@@ -2107,6 +2132,8 @@ void VulkanDevice::StoreIdleResults(bool reapFirst) {
 }
 
 void VulkanDevice::SubmitRecorded(bool reapFirst) {
+    const auto vkFlipStart = kFlipTraceVk ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    if (kFlipTraceVk) std::fprintf(stderr, "[flip] vk-submit start reapFirst=%d tid=0x%x\n", static_cast<int>(reapFirst), flipTid());
     if (!state->recorder) return;
     // Finished batches are retired first (a non-blocking fence status check on the front of the
     // in-flight list), so PendingWriteOverlaps/HasCompletions scans stay short and a label recorded
@@ -2115,6 +2142,7 @@ void VulkanDevice::SubmitRecorded(bool reapFirst) {
     // mutex (see the header), which a poller or compute worker must never do for queue 0.
     if (reapFirst && OpportunisticReap()) state->recorder->Reap();
     state->recorder->Submit();
+    if (kFlipTraceVk) std::fprintf(stderr, "[flip] vk-submit end took=%.1f ms tid=0x%x\n", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - vkFlipStart).count(), flipTid());
 }
 
 bool VulkanDevice::CanWaitUnlocked() const {
@@ -3378,6 +3406,7 @@ void VulkanDevice::FlipBatches(std::uint64_t& submissions, std::uint64_t& unsign
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     submissions = state->recorder ? state->recorder->Submissions() : 0;
     unsignaled = profile && state->recorder ? state->recorder->UnsignaledBatches() : 0;
+    if (kFlipTraceVk) std::fprintf(stderr, "[flip] vk-flip-batches subs=%llu unsignaled=%llu tid=0x%x\n", static_cast<unsigned long long>(submissions), static_cast<unsigned long long>(unsignaled), flipTid());
 }
 
 double VulkanDevice::RetirePresents(std::size_t keepInFlight) {
@@ -5018,6 +5047,7 @@ VulkanDevice::IndirectOutcome VulkanDevice::dispatch(const ShaderRecompiler::Rec
     timing.Mark("command_record");
     timer.phase(PhaseRecord);
     APS5_LOG_OUT_DEBUG("Dispatch recorded groups=%s", groupsText);
+    DumpDispatchRes("ordinary", resources.get(), programAddress, groupsText, arguments);
     // Address-based shaders pin guest allocations until their write-back, which the completion runs
     // when the batch finished (deferred lease release, see Graphics::SyncLeaseWork): a guest thread
     // that needs a leased allocation syncs the recorder itself through the registry's pin waiter.
@@ -5189,6 +5219,7 @@ RecipeOutcome VulkanDevice::DispatchRecipe(const ShaderRecompiler::RecompileResu
     counters.hits.fetch_add(1, std::memory_order_relaxed);
     if (record.dataRefresh != RecordedDispatch::DataRefresh::None) (record.refreshed ? counters.dataRefreshed : counters.dataSkipped).fetch_add(1, std::memory_order_relaxed);
     APS5_LOG_OUT_DEBUG("Dispatch recorded from recipe groups=%s", groupsText);
+    DumpDispatchRes("recipe", hit->resources.get(), programAddress, groupsText, arguments);
     if (SyncEachDispatch()) {
         Graphics::Recorder::CountSync(3);
         state->recorder->Sync();

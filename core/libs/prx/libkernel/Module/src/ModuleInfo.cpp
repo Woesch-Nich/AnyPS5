@@ -393,6 +393,16 @@ extern "C" {
 
 int APS5_VABI sceKernelGetModuleInfoFromAddr(std::uint64_t address, int flags, ModuleInfoEx* info) {
     if (!info) return SCE_KERNEL_ERROR_EFAULT;
+#ifdef _WIN32
+    // A27 probe: on Windows this is a no-op stub (see commit ba8c8c4b). The game
+    // (__cxa_thread_atexit) passes its own struct whose st_size we do not match,
+    // so the strict flags/st_size validation (below) aborts boot here. Relax it
+    // to a clean return-0 and let boot proceed; the Linux path keeps the checks.
+    (void)address;
+    (void)flags;
+    (void)info;
+    return 0;
+#else
     if (flags != 2) throw std::invalid_argument("sceKernelGetModuleInfoFromAddr: unsupported flags " + std::to_string(flags));
     ModuleInfoEx result{};
     result.st_size = sizeof(ModuleInfoEx);
@@ -410,6 +420,7 @@ int APS5_VABI sceKernelGetModuleInfoFromAddr(std::uint64_t address, int flags, M
 #endif
     *info = result;
     return 0;
+#endif
 }
 
 int APS5_VABI sceKernelGetModuleList(KernelModule* handles, std::size_t count, std::size_t* actual) {

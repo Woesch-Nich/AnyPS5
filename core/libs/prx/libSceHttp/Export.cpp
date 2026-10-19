@@ -1,4 +1,5 @@
 #include <cstdint>
+#include "prx/libc/include/general/CallCount.hpp"
 #include <cstddef>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -7,6 +8,7 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libSceHttp/src/HttpErrors.hpp"
+#include "../libkernel/File/include/Flight.hpp"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -19,7 +21,6 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-
 // No network is emulated: contexts, templates and requests can be created, but any request
 // that would touch the network fails with the library's network error.
 static std::atomic<int> g_nextHandle{1};
@@ -116,35 +117,55 @@ static void MarkDestroyed(HttpEpoll& epoll) {
     epoll.wake.NotifyAll();
 }
 
+// A49 ([net]): log the first 300 network-touching calls with name + return value.
+static void net_log(const char* func, int ret) {
+    static std::atomic<int> total{0};
+    static std::mutex mtx;
+    const int n = total.fetch_add(1, std::memory_order_relaxed) + 1;
+    std::lock_guard<std::mutex> lk(mtx);
+    if (n <= 300) {
+        std::fprintf(stderr, "[net] #%d %s -> 0x%08x\n", n, func, static_cast<unsigned>(ret));
+        std::fflush(stderr);
+    } else if (n == 301) {
+        std::fprintf(stderr, "[net] ... (logging capped at 300)\n");
+        std::fflush(stderr);
+    }
+}
+
 extern "C" {
 
 int APS5_VABI sceHttpAbortRequest(int request_id) {
+    APS5_A55_BEGIN("sceHttpAbortRequest");
     (void)request_id;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttpAddRequestHeader(int id, const char* name, const char* value, uint32_t mode) {
+    APS5_A55_BEGIN("sceHttpAddRequestHeader");
     (void)id;
     (void)name;
     (void)value;
     (void)mode;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttpCreateConnection(int tmpl_id, const char* server_name, const char* scheme, uint16_t port, int enable_keep_alive) {
+    APS5_A55_BEGIN("sceHttpCreateConnection");
     (void)tmpl_id;
-    (void)server_name;
-    (void)scheme;
-    (void)port;
     (void)enable_keep_alive;
-    return g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+    std::fprintf(stderr, "[net] http conn host=%s scheme=%s port=%u\n",
+                 server_name ? server_name : "?", scheme ? scheme : "?", (unsigned)port);
+    std::fflush(stderr);
+    return APS5_A55_END(g_nextHandle.fetch_add(1, std::memory_order_relaxed));
 }
 
 int APS5_VABI sceHttpCreateConnectionWithURL(int tmpl_id, const char* url, int enable_keep_alive) {
+    APS5_A55_BEGIN("sceHttpCreateConnectionWithURL");
     (void)tmpl_id;
-    (void)url;
     (void)enable_keep_alive;
-    return g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+    std::fprintf(stderr, "[net] http conn url=%s\n", url ? url : "?");
+    std::fflush(stderr);
+    return APS5_A55_END(g_nextHandle.fetch_add(1, std::memory_order_relaxed));
 }
 
 int APS5_VABI sceHttpCreateEpoll(int http_ctx_id, HttpEpollHandle* eh) {
@@ -155,47 +176,49 @@ int APS5_VABI sceHttpCreateEpoll(int http_ctx_id, HttpEpollHandle* eh) {
     auto epoll = std::make_shared<HttpEpoll>();
     *eh = epoll.get();
     g_epolls.emplace(epoll.get(), std::move(epoll));
-    return 0;
-}
+    return 0;}
 
 int APS5_VABI sceHttpCreateRequest(int conn_id, int method, const char* path, uint64_t content_length) {
-    (void)conn_id;
-    (void)method;
-    (void)path;
-    (void)content_length;
-    return g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+    APS5_A55_BEGIN("sceHttpCreateRequest");
+    std::fprintf(stderr, "[net] http req method=%d path=%s\n", method, path ? path : "?");
+    std::fflush(stderr);
+    return APS5_A55_END(g_nextHandle.fetch_add(1, std::memory_order_relaxed));
 }
 
 int APS5_VABI sceHttpCreateRequestWithURL2(int conn_id, const char* method, const char* url, uint64_t content_length) {
+    APS5_A55_BEGIN("sceHttpCreateRequestWithURL2");
     (void)conn_id;
     (void)method;
-    (void)url;
-    (void)content_length;
-    return g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+        (void)content_length;
+    std::fprintf(stderr, "[net] http req url=%s\n", url ? url : "?");
+    std::fflush(stderr);
+    return APS5_A55_END(g_nextHandle.fetch_add(1, std::memory_order_relaxed));
 }
 
 int APS5_VABI sceHttpCreateTemplate(int http_ctx_id, const char* user_agent, int http_ver, int is_auto_proxy_conf) {
+    APS5_A55_BEGIN("sceHttpCreateTemplate");
     (void)http_ctx_id;
     (void)user_agent;
     (void)http_ver;
     (void)is_auto_proxy_conf;
-    return g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+    return APS5_A55_END(g_nextHandle.fetch_add(1, std::memory_order_relaxed));
 }
 
 int APS5_VABI sceHttpDeleteConnection(int conn_id) {
+    APS5_A55_BEGIN("sceHttpDeleteConnection");
     (void)conn_id;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttpDeleteRequest(int req_id) {
     std::lock_guard lock(g_statusMutex);
     g_statusCallbacks.erase(req_id);
-    return 0;
-}
+    return 0;}
 
 int APS5_VABI sceHttpDeleteTemplate(int tmpl_id) {
+    APS5_A55_BEGIN("sceHttpDeleteTemplate");
     (void)tmpl_id;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttpDestroyEpoll(int http_ctx_id, HttpEpollHandle eh) {
@@ -210,56 +233,63 @@ int APS5_VABI sceHttpDestroyEpoll(int http_ctx_id, HttpEpollHandle eh) {
         g_epolls.erase(eh);
     }
     MarkDestroyed(*epoll);
-    return 0;
-}
+    return 0;}
 
 int APS5_VABI sceHttpGetAllResponseHeaders(int request_id, char** header, size_t* header_size) {
+    APS5_A55_BEGIN("sceHttpGetAllResponseHeaders");
     (void)request_id;
     (void)header;
     (void)header_size;
-    return ERROR_NETWORK;
+    return APS5_A55_END(ERROR_NETWORK);
 }
 
 int APS5_VABI sceHttpGetResponseContentLength(int request_id, int* result, uint64_t* content_length) {
+    APS5_A55_BEGIN("sceHttpGetResponseContentLength");
     (void)request_id;
     (void)result;
     (void)content_length;
-    return ERROR_NETWORK;
+    return APS5_A55_END(ERROR_NETWORK);
 }
 
 int APS5_VABI sceHttpGetStatusCode(int request_id, int* status_code) {
+    APS5_A55_BEGIN("sceHttpGetStatusCode");
     (void)request_id;
     (void)status_code;
-    return ERROR_NETWORK;
+    return APS5_A55_END(ERROR_NETWORK);
 }
 
 int APS5_VABI sceHttpInit_nid_postfix(int memid, int ssl_ctx_id, uint64_t pool_size) {
+    APS5_A55_BEGIN("sceHttpInit_nid_postfix");
     (void)memid;
     (void)ssl_ctx_id;
     (void)pool_size;
     const int id = g_nextHandle.fetch_add(1, std::memory_order_relaxed);
     std::lock_guard lock(g_stateMutex);
     g_contexts.insert(id);
-    return id;
-}
+    return id;}
 
 int APS5_VABI sceHttpsDisableOption(int id, uint32_t ssl_flags) {
+    APS5_A55_BEGIN("sceHttpsDisableOption");
     (void)id;
     (void)ssl_flags;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttpSendRequest(int request_id, const void* post_data, size_t size) {
+    APS5_A55_BEGIN("sceHttpSendRequest");
+    Aps5Flight::Scope flight("sceHttpSendRequest");
     (void)request_id;
     (void)post_data;
     (void)size;
-    return ERROR_NETWORK;
+    net_log(__func__, ERROR_NETWORK);
+    return APS5_A55_END(ERROR_NETWORK);
 }
 
 int APS5_VABI sceHttpSetAuthEnabled(int id, int enable) {
+    APS5_A55_BEGIN("sceHttpSetAuthEnabled");
     (void)id;
     (void)enable;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttpSetAuthInfoCallback(int id, HttpAuthInfoCallback callback, void* userArg) {
@@ -277,34 +307,39 @@ int APS5_VABI sceHttpSetCookieEnabled(int id, int enable) {
 }
 
 int APS5_VABI sceHttpSetAutoRedirect(int id, int enable) {
+    APS5_A55_BEGIN("sceHttpSetAutoRedirect");
     (void)id;
     (void)enable;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttpSetConnectTimeOut(int id, uint32_t usec) {
+    APS5_A55_BEGIN("sceHttpSetConnectTimeOut");
     (void)id;
     (void)usec;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttpSetEpoll(int id, HttpEpollHandle eh, void* user_arg) {
+    APS5_A55_BEGIN("sceHttpSetEpoll");
     (void)id;
     (void)eh;
     (void)user_arg;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttpSetNonblock(int id, int enable) {
+    APS5_A55_BEGIN("sceHttpSetNonblock");
     (void)id;
     (void)enable;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttpSetRecvTimeOut(int id, uint32_t usec) {
+    APS5_A55_BEGIN("sceHttpSetRecvTimeOut");
     (void)id;
     (void)usec;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttpSetRecvBlockSize(int id, uint32_t block_size) {
@@ -314,46 +349,53 @@ int APS5_VABI sceHttpSetRecvBlockSize(int id, uint32_t block_size) {
 }
 
 int APS5_VABI sceHttpSetResponseHeaderMaxSize(int id, uint64_t header_size) {
+    APS5_A55_BEGIN("sceHttpSetResponseHeaderMaxSize");
     (void)id;
     (void)header_size;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttpSetRequestContentLength(int request_id, uint64_t content_length) {
+    APS5_A55_BEGIN("sceHttpSetRequestContentLength");
     (void)request_id;
     (void)content_length;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttpSetResolveRetry(int id, int32_t retry) {
+    APS5_A55_BEGIN("sceHttpSetResolveRetry");
     (void)id;
     (void)retry;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttpSetResolveTimeOut(int id, uint32_t usec) {
+    APS5_A55_BEGIN("sceHttpSetResolveTimeOut");
     (void)id;
     (void)usec;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttpSetSendTimeOut(int id, uint32_t usec) {
+    APS5_A55_BEGIN("sceHttpSetSendTimeOut");
     (void)id;
     (void)usec;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttpsSetMinSslVersion(int id, uint32_t ssl_version) {
+    APS5_A55_BEGIN("sceHttpsSetMinSslVersion");
     (void)id;
     (void)ssl_version;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttpsSetSslCallback(int id, HttpsCallback cbfunc, void* user_arg) {
+    APS5_A55_BEGIN("sceHttpsSetSslCallback");
     (void)id;
     (void)cbfunc;
     (void)user_arg;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttpTerm_nid_postfix(int http_ctx_id) {
@@ -367,12 +409,12 @@ int APS5_VABI sceHttpTerm_nid_postfix(int http_ctx_id) {
         g_epolls.clear();
     }
     for (const auto& epoll : epolls) MarkDestroyed(*epoll);
-    return 0;
-}
+    return 0;}
 
 int APS5_VABI sceHttpUnsetEpoll(int id) {
+    APS5_A55_BEGIN("sceHttpUnsetEpoll");
     (void)id;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttpWaitRequest(HttpEpollHandle eh, HttpNBEvent* nbev, int maxevents, int timeout) {
@@ -392,40 +434,45 @@ int APS5_VABI sceHttpWaitRequest(HttpEpollHandle eh, HttpNBEvent* nbev, int maxe
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(timeout);
         while (!woken() && std::chrono::steady_clock::now() < deadline) epoll->wake.WaitUntil(lock, deadline);
     }
-    return epoll->aborted ? ERROR_ABORTED : 0;
-}
+    return epoll->aborted ? ERROR_ABORTED : 0;}
 
 int APS5_VABI sceHttpCreateRequestWithURL(int conn_id, int method, const char* url, uint64_t content_length) {
+    APS5_A55_BEGIN("sceHttpCreateRequestWithURL");
     (void)conn_id;
     (void)method;
-    (void)url;
-    (void)content_length;
-    return g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+        (void)content_length;
+    std::fprintf(stderr, "[net] http req url=%s\n", url ? url : "?");
+    std::fflush(stderr);
+    return APS5_A55_END(g_nextHandle.fetch_add(1, std::memory_order_relaxed));
 }
 
 int APS5_VABI sceHttpReadData(int request_id, void* data, size_t size) {
+    APS5_A55_BEGIN("sceHttpReadData");
     (void)request_id;
     (void)data;
     (void)size;
-    return ERROR_NETWORK;
+    return APS5_A55_END(ERROR_NETWORK);
 }
 
 int APS5_VABI sceHttpRedirectCacheFlush(int http_ctx_id) {
+    APS5_A55_BEGIN("sceHttpRedirectCacheFlush");
     (void)http_ctx_id;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttpSetChunkedTransferEnabled(int id, int enable) {
+    APS5_A55_BEGIN("sceHttpSetChunkedTransferEnabled");
     (void)id;
     (void)enable;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 
 int APS5_VABI sceHttpSetInflateGZIPEnabled(int id, int enable) {
+    APS5_A55_BEGIN("sceHttpSetInflateGZIPEnabled");
     (void)id;
     if (static_cast<uint32_t>(enable) > 1) return ERROR_INVALID_VALUE;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttpSetRequestStatusCallback(int id, HttpRequestStatusCallback callback, void* argument) {
@@ -433,8 +480,7 @@ int APS5_VABI sceHttpSetRequestStatusCallback(int id, HttpRequestStatusCallback 
     std::lock_guard lock(g_statusMutex);
     if (callback) g_statusCallbacks[id] = {callback, argument};
     else g_statusCallbacks.erase(id);
-    return 0;
-}
+    return 0;}
 
 int APS5_VABI sceHttpParseResponseHeader(const char* header, std::size_t headerLen, const char* fieldStr,
                                        const char** fieldValue, std::size_t* valueLen) {
@@ -499,40 +545,43 @@ int APS5_VABI sceHttpParseResponseHeader(const char* header, std::size_t headerL
 }
 
 int APS5_VABI sceHttpCreateRequest2(int conn_id, const char* method, const char* path, uint64_t content_length) {
-    (void)conn_id;
-    (void)method;
-    (void)path;
-    (void)content_length;
-    return g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+    APS5_A55_BEGIN("sceHttpCreateRequest2");
+    std::fprintf(stderr, "[net] http req method=%d path=%s\n", method, path ? path : "?");
+    std::fflush(stderr);
+    return APS5_A55_END(g_nextHandle.fetch_add(1, std::memory_order_relaxed));
 }
 
 int APS5_VABI sceHttpsEnableOption(int id, uint32_t ssl_flags) {
+    APS5_A55_BEGIN("sceHttpsEnableOption");
     (void)id;
     (void)ssl_flags;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttpsLoadCert(int http_ctx_id, int num, void* ca_list, void* cert, void* key) {
+    APS5_A55_BEGIN("sceHttpsLoadCert");
     (void)http_ctx_id;
     (void)num;
     (void)ca_list;
     (void)cert;
     (void)key;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttpsUnloadCert(int http_ctx_id) {
+    APS5_A55_BEGIN("sceHttpsUnloadCert");
     (void)http_ctx_id;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttpGetLastErrno(int request_id, int* errno_out) {
+    APS5_A55_BEGIN("sceHttpGetLastErrno");
     (void)request_id;
     if (errno_out == nullptr) {
-        return ERROR_INVALID_VALUE;
+        return APS5_A55_END(ERROR_INVALID_VALUE);
     }
     *errno_out = 0;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttpsGetSslError(int id, int* err_num, uint32_t* detail) {

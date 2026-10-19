@@ -1,4 +1,5 @@
 #include <cstdint>
+#include "prx/libc/include/general/CallCount.hpp"
 #include <cstddef>
 #include <cstring>
 #include "SceTypes.hpp"
@@ -104,11 +105,12 @@ static int CompleteAsync(const char* function, int req_id, const Http2AsyncOptio
 extern "C" {
 
 int APS5_VABI sceHttp2AddRequestHeader(int id, const char* name, const char* value, uint32_t mode) {
+    APS5_A55_BEGIN("sceHttp2AddRequestHeader");
     (void)id;
     (void)name;
     (void)value;
     (void)mode;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttp2CreateRequestWithURL(int tmpl_id, const char* method, const char* url, uint64_t content_length) {
@@ -130,8 +132,7 @@ int APS5_VABI sceHttp2CreateTemplate(int lib_http2_ctx_id, const char* user_agen
     if (FindHandle(lib_http2_ctx_id, Http2Kind::Context) == nullptr) return ERROR_INVALID_ID;
     const int id = g_nextHandle.fetch_add(1, std::memory_order_relaxed);
     g_handles[id] = {Http2Kind::Template, lib_http2_ctx_id, 0};
-    return id;
-}
+    return id;}
 
 int APS5_VABI sceHttp2DeleteRequest(int req_id) {
     {
@@ -152,30 +153,33 @@ int APS5_VABI sceHttp2DeleteTemplate(int tmpl_id) {
         g_handles.erase(tmpl_id);
     }
     EraseCompletions(removed);
-    return 0;
-}
+    return 0;}
 
 int APS5_VABI sceHttp2GetAllResponseHeaders(int req_id, char** header, size_t* header_size) {
+    APS5_A55_BEGIN("sceHttp2GetAllResponseHeaders");
     (void)req_id;
     (void)header;
     (void)header_size;
-    return ERROR_NETWORK;
+    return APS5_A55_END(ERROR_NETWORK);
 }
 
 int APS5_VABI sceHttp2GetResponseContentLength(int req_id, int* result, uint64_t* content_length) {
+    APS5_A55_BEGIN("sceHttp2GetResponseContentLength");
     (void)req_id;
     (void)result;
     (void)content_length;
-    return ERROR_NETWORK;
+    return APS5_A55_END(ERROR_NETWORK);
 }
 
 int APS5_VABI sceHttp2GetStatusCode(int req_id, int* status_code) {
+    APS5_A55_BEGIN("sceHttp2GetStatusCode");
     (void)req_id;
     (void)status_code;
-    return ERROR_NETWORK;
+    return APS5_A55_END(ERROR_NETWORK);
 }
 
 int APS5_VABI sceHttp2Init(int libnet_mem_id, int libssl_ctx_id, size_t pool_size, int max_concurrent_request) {
+    APS5_A55_BEGIN("sceHttp2Init");
     (void)libnet_mem_id;
     (void)libssl_ctx_id;
     (void)max_concurrent_request;
@@ -186,26 +190,29 @@ int APS5_VABI sceHttp2Init(int libnet_mem_id, int libssl_ctx_id, size_t pool_siz
 }
 
 int APS5_VABI sceHttp2ReadData(int req_id, void* data, size_t size) {
+    APS5_A55_BEGIN("sceHttp2ReadData");
     (void)req_id;
     (void)data;
     (void)size;
-    return ERROR_NETWORK;
+    return APS5_A55_END(ERROR_NETWORK);
 }
 
 int APS5_VABI sceHttp2ReadDataAsync(int req_id, void* data, size_t size, void* kqueue_option, void* option) {
+    APS5_A55_BEGIN("sceHttp2ReadDataAsync");
     (void)req_id;
     (void)data;
     (void)size;
     (void)kqueue_option;
     (void)option;
-    return ERROR_NETWORK;
+    return APS5_A55_END(ERROR_NETWORK);
 }
 
 int APS5_VABI sceHttp2SendRequest(int req_id, const void* post_data, size_t size) {
+    APS5_A55_BEGIN("sceHttp2SendRequest");
     (void)req_id;
     (void)post_data;
     (void)size;
-    return ERROR_NETWORK;
+    return APS5_A55_END(ERROR_NETWORK);
 }
 
 int APS5_VABI sceHttp2SendRequestAsync(int req_id, const void* post_data, size_t size, Http2AsyncOption* kqueue_option, void* option) {
@@ -215,77 +222,89 @@ int APS5_VABI sceHttp2SendRequestAsync(int req_id, const void* post_data, size_t
 }
 
 int APS5_VABI sceHttp2SetAuthEnabled(int id, int is_enable) {
+    APS5_A55_BEGIN("sceHttp2SetAuthEnabled");
     (void)id;
     (void)is_enable;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttp2SetAutoRedirect(int id, int enable) {
+    APS5_A55_BEGIN("sceHttp2SetAutoRedirect");
     (void)id;
     (void)enable;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttp2SetConnectionWaitTimeOut(int id, uint32_t usec) {
+    APS5_A55_BEGIN("sceHttp2SetConnectionWaitTimeOut");
     (void)id;
     (void)usec;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttp2SetConnectTimeOut(int id, uint32_t usec) {
+    APS5_A55_BEGIN("sceHttp2SetConnectTimeOut");
     (void)id;
     (void)usec;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttp2SetInflateGZIPEnabled(int id, int enable) {
+    APS5_A55_BEGIN("sceHttp2SetInflateGZIPEnabled");
     (void)id;
     (void)enable;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttp2SetRecvTimeOut(int id, uint32_t usec) {
+    APS5_A55_BEGIN("sceHttp2SetRecvTimeOut");
     (void)id;
     (void)usec;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttp2SetRedirectCallback(int id, void* cb_func, void* user_arg) {
+    APS5_A55_BEGIN("sceHttp2SetRedirectCallback");
     (void)id;
     (void)cb_func;
     (void)user_arg;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttp2SetRequestContentLength(int id, uint64_t content_length) {
+    APS5_A55_BEGIN("sceHttp2SetRequestContentLength");
     (void)id;
     (void)content_length;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttp2SetResolveTimeOut(int id, uint32_t usec) {
+    APS5_A55_BEGIN("sceHttp2SetResolveTimeOut");
     (void)id;
     (void)usec;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttp2SetSendTimeOut(int id, uint32_t usec) {
+    APS5_A55_BEGIN("sceHttp2SetSendTimeOut");
     (void)id;
     (void)usec;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttp2SetSslCallback(int id, void* cb_func, void* user_arg) {
+    APS5_A55_BEGIN("sceHttp2SetSslCallback");
     (void)id;
     (void)cb_func;
     (void)user_arg;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttp2SetTimeOut(int id, uint32_t usec) {
+    APS5_A55_BEGIN("sceHttp2SetTimeOut");
     (void)id;
     (void)usec;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttp2SslDisableOption(int id, uint32_t ssl_flags) {
@@ -300,8 +319,7 @@ int APS5_VABI sceHttp2SslEnableOption(int id, uint32_t ssl_flags) {
 
 int APS5_VABI sceHttp2SetMinSslVersion(int id, uint32_t ssl_version) {
     (void)ssl_version;
-    return HandleIsLive(id) ? 0 : ERROR_INVALID_ID;
-}
+    return HandleIsLive(id) ? 0 : ERROR_INVALID_ID;}
 
 int APS5_VABI sceHttp2Term(int lib_http2_ctx_id) {
     std::vector<int> removed;
@@ -327,8 +345,9 @@ int APS5_VABI sceHttp2WaitAsync(int req_id, Http2AsyncResult* result, uint32_t* 
 }
 
 int APS5_VABI sceHttp2AbortRequest(int req_id) {
+    APS5_A55_BEGIN("sceHttp2AbortRequest");
     (void)req_id;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttp2GetMemoryPoolStats(int lib_http2_ctx_id, Http2MemoryPoolStats* stats) {
@@ -344,8 +363,9 @@ int APS5_VABI sceHttp2GetMemoryPoolStats(int lib_http2_ctx_id, Http2MemoryPoolSt
 }
 
 int APS5_VABI sceHttp2CookieFlush(int id) {
+    APS5_A55_BEGIN("sceHttp2CookieFlush");
     (void)id;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttp2CreateCookieBox(int lib_http2_ctx_id) {
@@ -353,8 +373,7 @@ int APS5_VABI sceHttp2CreateCookieBox(int lib_http2_ctx_id) {
     if (FindHandle(lib_http2_ctx_id, Http2Kind::Context) == nullptr) return ERROR_INVALID_ID;
     const int id = g_nextHandle.fetch_add(1, std::memory_order_relaxed);
     g_handles[id] = {Http2Kind::CookieBox, lib_http2_ctx_id, 0};
-    return id;
-}
+    return id;}
 
 int APS5_VABI sceHttp2DeleteCookieBox(int cookie_box_id) {
     std::lock_guard lock(g_handlesMutex);
@@ -364,14 +383,16 @@ int APS5_VABI sceHttp2DeleteCookieBox(int cookie_box_id) {
 }
 
 int APS5_VABI sceHttp2SetCookieBox(int id, int cookie_box_id) {
+    APS5_A55_BEGIN("sceHttp2SetCookieBox");
     (void)id;
     (void)cookie_box_id;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 int APS5_VABI sceHttp2SetRequestNoContentLength(int id) {
+    APS5_A55_BEGIN("sceHttp2SetRequestNoContentLength");
     (void)id;
-    return 0;
+    return APS5_A55_END(0);
 }
 
 

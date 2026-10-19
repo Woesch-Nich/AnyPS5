@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstdint>
+#include "prx/libc/include/general/LogMacros.hpp"
 #include <cstddef>
 #include <limits>
 #include "SceTypes.hpp"
@@ -1117,8 +1118,7 @@ int64_t APS5_VABI sceKernelPread(int d, void* buf, size_t nbytes, int64_t offset
     if (const auto archived = File::ReadArchivedFile(d, buf, nbytes, &offset)) return *archived;
     char empty = 0;
     const auto result = NativePread(d, nbytes == 0 && buf == nullptr ? &empty : buf, nbytes, offset);
-    return result < 0 ? SceErrorFromErrno(errno) : result;
-}
+    return result < 0 ? SceErrorFromErrno(errno) : result;}
 
 int64_t APS5_VABI sceKernelPwrite(int d, const void* buf, size_t nbytes, int64_t offset) {
     if (buf == nullptr && nbytes != 0) return SceErrorFromErrno(GUEST_EFAULT);

@@ -1,6 +1,7 @@
 #include "IntermediateRepresentation/IrProgram.hpp"
 #include <algorithm>
 #include <bit>
+#include <cstdio>
 #include <iomanip>
 #include <limits>
 #include <map>
@@ -761,13 +762,27 @@ void ValidateProgram(const IrProgram& program, bool requireSsa) {
                 if (inst->Opcode() == IrOpcode::Phi) {
                     const auto* predecessor = inst->PhiBlock(argIndex);
                     if (definition->Parent() != predecessor && !dominates(definition->Parent(), predecessor)) {
+                        // #A135-r3 TEMP: name the failing phi edge for forensics; remove with the r3 diagnostics.
+                        std::fprintf(stderr,
+                                     "[ir-phi-check] phi block=%u phiId=%u arg=%zu/%zu defId=%u defOp=%s defBlock=%u defArgC=%zu edgePred=%u blockIndex=%zu\n",
+                                     block->Id(), inst->Id(), argIndex, inst->ArgumentCount(),
+                                     definition->Id(), std::string(IrOpcodeName(definition->Opcode())).c_str(),
+                                     definition->Parent()->Id(), definition->ArgumentCount(), predecessor->Id(), blockIndex);
                         fail("value IR Phi incoming definition does not dominate its edge");
                     }
                 } else if (definition->Parent() == block) {
                     if (instructionPositions.at(definition) >= instructionPositions.at(inst)) {
+                        // #A135-r3 TEMP: name the failing pair; remove with the r3 diagnostics.
+                        std::fprintf(stderr, "[ir-sameblock-check] block=%u useId=%u useOp=%s arg=%zu defId=%u defOp=%s\n",
+                                     block->Id(), inst->Id(), std::string(IrOpcodeName(inst->Opcode())).c_str(), argIndex,
+                                     definition->Id(), std::string(IrOpcodeName(definition->Opcode())).c_str());
                         fail("value IR instruction uses a same-block definition before it");
                     }
                 } else if (!dominates(definition->Parent(), block)) {
+                    // #A135-r3 TEMP: name the failing pair; remove with the r3 diagnostics.
+                    std::fprintf(stderr, "[ir-dom-check] useBlock=%u useId=%u useOp=%s arg=%zu defId=%u defOp=%s defBlock=%u\n",
+                                 block->Id(), inst->Id(), std::string(IrOpcodeName(inst->Opcode())).c_str(), argIndex,
+                                 definition->Id(), std::string(IrOpcodeName(definition->Opcode())).c_str(), definition->Parent()->Id());
                     fail("value IR instruction definition does not dominate its use");
                 }
             }

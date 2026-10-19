@@ -1,4 +1,5 @@
 #include "prx/libc/include/General.hpp"
+#include "prx/libkernel/Module/include/GuestImageBases.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libkernel/Module/ModuleArgs.hpp"
 #include <nid/NidCompute.hpp>
@@ -54,6 +55,31 @@ std::mutex modulesMutex;
 std::map<std::uintptr_t, std::shared_ptr<Module>> modules;
 std::uintptr_t nextHandle = 0x20000000;
 std::map<const void*, std::uintptr_t> imageIds;
+
+// Guest-module image bases (allocation base -> SizeOfImage). Populated as
+// modules load, consulted by DirectMemory to whitelist guest-image
+// protection. Kept in sync with the `modules` map under the same lock.
+std::map<std::uintptr_t, std::uintptr_t> guestImageImages;
+
+// Allocation base + SizeOfImage for a PE module, or the base with a zero size
+// when the header can't be read. The guest image (its committed .text/.data
+// pages) is what the game will mprotect.
+void RecordGuestImage(const void* module) {
+    guestImageImages[reinterpret_cast<std::uintptr_t>(module)] = 0;
+#ifdef _WIN32
+    auto* dos = static_cast<const IMAGE_DOS_HEADER*>(module);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
+    auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(
+        reinterpret_cast<std::uintptr_t>(module) + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return;
+    // Magic is the first field of both the 32- and 64-bit optional header.
+    const auto magic = reinterpret_cast<const WORD*>(&nt->OptionalHeader)[0];
+    auto sizeOfImage = (magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
+        ? reinterpret_cast<const IMAGE_OPTIONAL_HEADER32*>(&nt->OptionalHeader)->SizeOfImage
+        : reinterpret_cast<const IMAGE_OPTIONAL_HEADER64*>(&nt->OptionalHeader)->SizeOfImage;
+    guestImageImages[reinterpret_cast<std::uintptr_t>(module)] = sizeOfImage;
+#endif
+}
 void* Symbol(Module& module, const char* name) {
 #ifdef _WIN32
     return reinterpret_cast<void*>(GetProcAddress(static_cast<HMODULE>(module.native), name));
@@ -102,6 +128,22 @@ void* FindSymbol(Module& module, const char* name) {
 #endif
 }
 }
+
+// Guest-module image bases (external linkage so DirectMemory can consult them).
+// `guestImageImages` and `modulesMutex` are in the anonymous namespace above;
+// these accessors keep them encapsulated while exposing the whitelist.
+namespace GuestImages {
+bool ContainsBase(const void* base) {
+    std::lock_guard lock(modulesMutex);
+    return guestImageImages.find(reinterpret_cast<std::uintptr_t>(base)) != guestImageImages.end();
+}
+std::uintptr_t EndForBase(const void* base) {
+    std::lock_guard lock(modulesMutex);
+    const auto found = guestImageImages.find(reinterpret_cast<std::uintptr_t>(base));
+    if (found == guestImageImages.end()) return 0;
+    return found->first + found->second;
+}
+} // namespace GuestImages
 
 extern "C" {
 char* APS5_VABI dlerror_nid_postfix() {
@@ -192,6 +234,9 @@ void* APS5_VABI dlopen_nid_postfix(const char* path, int flags) {
         if (!module->native) { Error(::dlerror()); return nullptr; }
 #endif
         std::lock_guard lock(modulesMutex);
+        if (path) {
+            RecordGuestImage(module->native);
+        }
         const auto handle = nextHandle++;
         modules.emplace(handle, std::move(module));
         return reinterpret_cast<void*>(handle);
@@ -249,8 +294,9 @@ int APS5_VABI dlclose_nid_postfix(void* handle) {
     {
         std::lock_guard lock(modulesMutex);
         auto found = modules.find(key);
-        if (found == modules.end()) { Error("dlclose: invalid module handle"); return -1; }
-        modules.erase(found);
+        if (found == modules.end()) { Error("dlclose: invalid module handle"); return -1; }        modules.erase(found);
+        // guestImageImages is keyed by the module's allocation base.
+        if (module) guestImageImages.erase(reinterpret_cast<std::uintptr_t>(module->native));
     }
     // Unload outside the registry lock: module destructors may call loader APIs.
     module.reset();

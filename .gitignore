@@ -109,3 +109,22 @@ cookies.txt
 
 .env
 .env.local
+
+app0/
+sce_module/
+games/
+game-dumps/
+captures/
+probes/
+shader_cache/
+pipeline_cache/
+*.prx
+*.self
+*.elf
+*.gnf
+*.pkg
+*.spv
+*.spvasm
+*.dmp
+*.dump
+*.bin

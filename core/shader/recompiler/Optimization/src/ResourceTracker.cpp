@@ -171,6 +171,9 @@ public:
         m_program.Resources().resourceTrackingComplete = true;
     }
 
+    // #A265: expose the fold in isolation (for the semantic fixtures + FoldImageResourceSlotLadders).
+    void FoldSlotLaddersOnly() { FoldSrtSlotLadders(); }
+
 private:
     struct HandlePatch {
         IrValue* handle = nullptr;
@@ -208,6 +211,89 @@ private:
         if (sampler && dword0->HasImmediate() && dword0->Type() == IrType::U32 && (dword0->ImmediateU32() & samplerBorderClampMask) == 0u) {
             descriptor.dwords[3] = &m_builder.Constant(0u);
         }
+    }
+
+    // a254 SRT-port (#A260-Doc; re-adds a240 FoldLadderSlotReads dropped by the upstream restructure):
+    // fold an SRT value-ladder phi into ReadConst(SRT, slot-phi) so the SrtEvaluator resolves it
+
+    bool phiBailOn() { return std::getenv("APS5_SRT_TABLE_TRACE") != nullptr; }
+
+    struct SlotLadderClass {
+        bool foldable = false;
+        bool hasLeaf = false;
+        bool hasPhi = false;
+        IrValue* badNode = nullptr;
+        const char* badWhy = nullptr;
+    };
+
+    SlotLadderClass ClassifySlotLadder(IrValue* value, std::set<IrValue*>& visiting) {
+        value = value->Resolve();
+        SlotLadderClass result;
+        if (value->HasImmediate()) {
+            if (value->Type() == IrType::U32 && value->ImmediateU32() < m_program.Resources().srtReads.size()) result.foldable = true;
+            else { result.badNode = value; result.badWhy = "imm"; }
+            return result;
+        }
+        if (!visiting.insert(value).second) { result.foldable = true; result.hasPhi = true; return result; }
+        if (value->Opcode() == IrOpcode::ReadConst && value->ArgumentCount() == 2u) {
+            IrValue* resource = value->Argument(0)->Resolve();
+            IrValue* slot = value->Argument(1)->Resolve();
+            if (resource->Opcode() == IrOpcode::GetSrtResource && slot->HasImmediate() && slot->Type() == IrType::U32
+                && slot->ImmediateU32() < m_program.Resources().srtReads.size()) { result.foldable = true; result.hasLeaf = true; }
+            else { result.badNode = value; result.badWhy = "readconst"; }
+        } else if (value->IsPhi()) {
+            result.foldable = true; result.hasPhi = true;
+            const auto isSlotLeaf = [](IrValue* v) {
+                v = v->Resolve();
+                return v->Opcode() == IrOpcode::ReadConst && v->ArgumentCount() == 2u
+                    && v->Argument(0)->Resolve()->Opcode() == IrOpcode::GetSrtResource
+                    && v->Argument(1)->Resolve()->HasImmediate();
+            };
+            const auto isPureSlotChainPhi = [&](IrValue* phi) {
+                for (std::size_t a = 0; a < phi->ArgumentCount(); a++) {
+                    IrValue* av = phi->Argument(a)->Resolve();
+                    if (av->Opcode() != IrOpcode::Phi && !isSlotLeaf(av)) return false;
+                }
+                return true;
+            };
+            for (std::size_t index = 0; index < value->ArgumentCount(); index++) {
+                IrValue* armValue = value->Argument(index);
+                if (armValue->Resolve()->IsPhi() && !isPureSlotChainPhi(armValue)) continue;
+                const SlotLadderClass arm = ClassifySlotLadder(armValue, visiting);
+                result.foldable = arm.foldable;
+                result.hasLeaf = result.hasLeaf || arm.hasLeaf;
+                if (!arm.foldable) { result.badNode = arm.badNode ? arm.badNode : value; result.badWhy = arm.badWhy ? arm.badWhy : "op"; break; }
+            }
+        } else { result.badNode = value; result.badWhy = "op"; }
+        visiting.erase(value);
+        return result;
+    }
+
+    bool FoldLadderSlotReads(IrValue& gir) {
+        bool foldedAny = false;
+        for (std::size_t dword = 0; dword < gir.ArgumentCount(); dword++) {
+            IrValue* current = gir.Argument(dword)->Resolve();
+            std::set<IrValue*> visiting;
+            const SlotLadderClass klass = ClassifySlotLadder(current, visiting);
+            if (!klass.foldable || !klass.hasPhi) continue;
+            IrValue* resource = EmitBefore(gir, IrOpcode::GetSrtResource, IrType::SrtResource, std::span<IrValue* const>{});
+            std::array<IrValue*, 2> readArgs{resource, current};
+            IrValue* read = EmitBefore(gir, IrOpcode::ReadConst, IrType::U32, readArgs);
+            gir.ReplaceArgument(dword, read);
+            foldedAny = true;
+            if (phiBailOn()) std::fprintf(stderr, "[ladder-fold] dword %u: slot ladder -> ReadConst(SRT, phi)\n", static_cast<unsigned>(dword));
+        }
+        return foldedAny;
+    }
+
+    void FoldSrtSlotLadders() {
+        std::vector<IrValue*> targets;
+        for (auto& block : m_program.Blocks()) {
+            for (IrValue* inst : block->Instructions()) {
+                if (inst->Opcode() == IrOpcode::GetImageResource || inst->Opcode() == IrOpcode::GetSamplerResource) targets.push_back(inst);
+            }
+        }
+        for (IrValue* inst : targets) FoldLadderSlotReads(*inst);
     }
 
     IrValue* canonicalizeSampleAdjustDword3(IrValue* value) {
@@ -1860,6 +1946,12 @@ private:
 
 void ResourceTracker::Track(IrProgram& program) const {
     Tracker(program).Run();
+}
+
+// #A265: fold-only entry (runs just FoldSrtSlotLadders, not the full track) for the semantic fixtures.
+void FoldImageResourceSlotLadders(IrProgram& program) {
+    Tracker tracker(program);
+    tracker.FoldSlotLaddersOnly();
 }
 
 }

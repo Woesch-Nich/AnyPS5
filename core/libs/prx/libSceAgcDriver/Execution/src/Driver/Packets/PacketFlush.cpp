@@ -5,8 +5,20 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Synchronization/DeferredLabels.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include <cstdlib>
+#include <windows.h>
 
 namespace AgcDriver::DriverDetail {
+
+namespace {
+const bool kFlipTraceFlush = std::getenv("APS5_TRACE_FLIP") != nullptr;
+unsigned flipTid() {
+#ifdef _WIN32
+    return ::GetCurrentThreadId();
+#else
+    return 0;
+#endif
+}
+} // namespace
 
 void Driver::flushBetweenPackets(std::uint32_t queue, std::uint32_t header, bool labelPacket) {
     static const bool packetFlush = !LabelBatchSubmit() && std::getenv("APS5_NO_LABEL_PACKET_FLUSH") == nullptr;
@@ -47,10 +59,12 @@ void Driver::flushBetweenPackets(std::uint32_t queue, std::uint32_t header, bool
     const bool capped = !submit && !record && batchCap() != 0 && work >= batchCap();
     const bool reap = !submit && !record && !capped && reapDue && (reapEachPacket() || now - lastReapTry >= ReapInterval);
     if (!submit && !record && !capped && !reap) {
+        if (kFlipTraceFlush && work > 0) std::fprintf(stderr, "[flip] flush q=%u skip-pending work=%llu tid=0x%x\n", queue, static_cast<unsigned long long>(work), flipTid());
         if (recordAtLock) ++recordTriesSkipped;
         return;
     }
     if (reap) lastReapTry = now;
+    if (kFlipTraceFlush) std::fprintf(stderr, "[flip] flush q=%u %s queued=%d pend=%d work=%llu tid=0x%x\n", queue, submit ? "submit" : record ? "record" : reap ? "reap" : "cap", static_cast<int>(queued), static_cast<int>(pending.has_value()), static_cast<unsigned long long>(work), flipTid());
     if (DrawPipeline::Active() && (submit || record || capped || recordAtLock)) {
         static const bool committerSubmits = std::getenv("APS5_PIPELINE_DRAIN_LABELS") == nullptr;
         if (committerSubmits && !record && !recordAtLock && DrawPipeline::Queue0().Busy()) return;

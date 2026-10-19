@@ -5,6 +5,7 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/SonyCrt.hpp"
 #include "prx/libkernel/Apr/include/AprCommandBuffer.hpp"
+#include "prx/libkernel/Pthread/include/JobDiag.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
 #include <algorithm>
 #include <array>
@@ -303,12 +304,14 @@ static void* APS5_VABI PadEntry_nid_no_patch(void* argument) {
 extern "C" {
 
 int APS5_VABI sceAmprCommandBufferWriteAddressOnCompletion(Apr::CommandBufferObject* buffer, volatile std::uint64_t* address, std::uint64_t value) {
+    APS5_TRACE("sceAmprCommandBufferWriteAddressOnCompletion", (uintptr_t)buffer);
     if (!ValidWriteAddress(address)) return SCE_KERNEL_ERROR_EINVAL;
     if (InMap(buffer)) return SCE_KERNEL_ERROR_EPERM;
     return AppendCommand(buffer, Apr::Opcode::WriteAddress, Apr::WriteAddressCommand{{}, reinterpret_cast<std::uint64_t>(address), value, 0, 0});
 }
 
 int APS5_VABI sceAmprCommandBufferWriteCounterOnCompletion(Apr::CommandBufferObject* buffer, std::uint8_t counter, std::uint32_t value) {
+    APS5_TRACE("sceAmprCommandBufferWriteCounterOnCompletion", (uintptr_t)buffer);
     if (!ValidCounter(counter)) return SCE_KERNEL_ERROR_EINVAL;
     if (InMap(buffer)) return SCE_KERNEL_ERROR_EPERM;
     return AppendCommand(buffer, Apr::Opcode::WriteCounter, Apr::WriteCounterCommand{{}, counter, Apr::CounterAccess::Size4, Apr::CounterOperation::Store, 0, value});
@@ -325,6 +328,7 @@ int APS5_VABI sceAmprCommandBufferWaitOnCounter(Apr::CommandBufferObject* buffer
 }
 
 int APS5_VABI sceAmprCommandBufferWriteKernelEventQueueOnCompletion(Apr::CommandBufferObject* buffer, std::uint64_t equeue, std::int32_t ident, std::uint64_t data) {
+    APS5_TRACE("sceAmprCommandBufferWriteKernelEventQueueOnCompletion", (uintptr_t)buffer);
     return RecordWriteKernelEventQueue(buffer, equeue, ident, data, true);
 }
 
@@ -346,10 +350,26 @@ std::uint64_t APS5_VABI sceAmprMeasureCommandSizeWaitOnAddress() { return sizeof
 std::uint64_t APS5_VABI sceAmprMeasureCommandSizeWaitOnCounter() { return sizeof(Apr::WaitCommand); }
 std::uint64_t APS5_VABI sceAmprMeasureCommandSizeWriteKernelEventQueueOnCompletion() { return sizeof(Apr::WriteKernelEventQueueCommand); }
 
+// #A170 (P0): log the command-buffer struct state at construct/setbuffer/clear so we can see
+// how (and whether) the game actually initializes buffer->base before a submit. Gated by
+// APS5_JOBDIAG; writes to stderr like the rest of jobdiag. (JobDiag is fully inline, so no
+// cross-PRX symbol deps for libSceAmpr.)
+static void _amprBufLog(const char* kind, const Apr::CommandBufferObject* b) {
+    if (!aps5::jobdiag::DiagEnabled() || !b) return;
+    thread_local char buf[160];
+    std::snprintf(buf, sizeof(buf),
+                  "type=%u rec=%u off=%u num=%d size=%u base=0x%llx",
+                  (unsigned)b->type, (unsigned)b->recording, (unsigned)b->offset,
+                  (int)b->numCommands, (unsigned)b->size,
+                  (unsigned long long)(std::uintptr_t)b->base);
+    aps5::jobdiag::Event(kind, (std::uintptr_t)b, buf);
+}
+
 int APS5_VABI sceAmprAprCommandBufferConstructor(Apr::CommandBufferObject* buffer, uint64_t* gatherState, uint64_t* scatterState) {
     buffer->type = Apr::BufferType::Apr;
     *gatherState = 0;
     *scatterState = 0;
+    _amprBufLog("ampr-aprctor", buffer);  // #A170
     return 0;
 }
 
@@ -377,6 +397,7 @@ int APS5_VABI sceAmprAprCommandBufferMapEnd(Apr::CommandBufferObject* buffer) {
 }
 
 int APS5_VABI sceAmprAprCommandBufferReadFile(Apr::CommandBufferObject* buffer, uint64_t* gatherState, uint64_t* scatterState, uint32_t fileId, void* destination, uint64_t size, uint64_t offset) {
+    APS5_TRACE("sceAmprAprCommandBufferReadFile", (uintptr_t)buffer);
     (void)gatherState;
     (void)scatterState;
     if (!ValidRead(destination, size, offset)) return SCE_KERNEL_ERROR_EINVAL;
@@ -415,6 +436,7 @@ int APS5_VABI sceAmprAprCommandBufferResetGatherScatterState(Apr::CommandBufferO
 }
 
 void* APS5_VABI sceAmprCommandBufferClearBuffer(Apr::CommandBufferObject* buffer) {
+    _amprBufLog("ampr-clearbuffer-before", buffer);  // #A170
     void* memory = buffer->base;
     buffer->base = nullptr;
     buffer->size = 0;
@@ -452,7 +474,9 @@ int APS5_VABI sceAmprCommandBufferConstructNop(Apr::CommandBufferObject* buffer,
 }
 
 int APS5_VABI sceAmprCommandBufferConstructor(Apr::CommandBufferObject* buffer) {
+    _amprBufLog("ampr-gencctor-before", buffer);  // #A170: state the game hands us
     *buffer = {Apr::BufferType::Generic, 0, 0, 0, 0, nullptr};
+    _amprBufLog("ampr-gencctor", buffer);
     return 0;
 }
 
@@ -512,10 +536,17 @@ int APS5_VABI sceAmprCommandBufferReset(Apr::CommandBufferObject* buffer) {
 }
 
 int APS5_VABI sceAmprCommandBufferSetBuffer(Apr::CommandBufferObject* buffer, void* memory, uint32_t size) {
+    {  // #A170: who supplies buffer->base?
+        thread_local char _sb[160];
+        std::snprintf(_sb, sizeof(_sb), "mem=0x%llx size=%u",
+                       (unsigned long long)(std::uintptr_t)memory, (unsigned)size);
+        aps5::jobdiag::Event("ampr-setbuffer", (std::uintptr_t)buffer, _sb);
+    }
     buffer->base = static_cast<uint8_t*>(memory);
     buffer->size = size;
     buffer->offset = 0;
     buffer->numCommands = 0;
+    _amprBufLog("ampr-setbuffer-after", buffer);  // #A170
     return 0;
 }
 
@@ -686,7 +717,14 @@ struct AmmSubmitResult {
 };
 
 int APS5_VABI sceAmprAmmCommandBufferConstructor(Apr::CommandBufferObject* buffer) {
-    (void)buffer;
+    // #A170 (P0 fix): the no-op left the game's struct uninitialized (buffer->base was stack
+    // garbage 0x1000100000002 -> APR _execute faulted reading it). Real PS5 inits the base
+    // struct before use; zero it like the generic constructor so base=nullptr (Append then
+    // fails gracefully with EPERM/BUFFER_FULL instead of faulting on garbage). The run log
+    // shows whether the game next calls SetBuffer to supply real memory (then base is valid).
+    _amprBufLog("ampr-ammctor-before", buffer);
+    if (buffer) *buffer = {Apr::BufferType::Generic, 0, 0, 0, 0, nullptr};
+    _amprBufLog("ampr-ammctor", buffer);
     return 0;
 }
 
@@ -874,6 +912,7 @@ int APS5_VABI sceAmprAmmSetPageTablePoolOccupancyNotificationThreshold(void) {
 }
 
 int APS5_VABI sceAmprAmmSubmitCommandBuffer(void* base, std::uint32_t offset, std::uint32_t priority) {
+    APS5_TRACE("sceAmprAmmSubmitCommandBuffer", (uintptr_t)base);
     if (priority > 2u) return SCE_KERNEL_ERROR_EINVAL;
     if (!base) return SCE_KERNEL_ERROR_EPERM;
     AmmSubmit_nid_no_patch(base, offset);
@@ -881,6 +920,7 @@ int APS5_VABI sceAmprAmmSubmitCommandBuffer(void* base, std::uint32_t offset, st
 }
 
 int APS5_VABI sceAmprAmmSubmitCommandBuffer2(void* base, std::uint32_t offset, std::uint32_t priority, AmmSubmitResult* result, std::uint32_t* id) {
+    APS5_TRACE("sceAmprAmmSubmitCommandBuffer2", (uintptr_t)base);
     if (priority > 2u) return SCE_KERNEL_ERROR_EINVAL;
     if (!base) return SCE_KERNEL_ERROR_EPERM;
     const auto submitted = AmmSubmit_nid_no_patch(base, offset);
@@ -890,6 +930,7 @@ int APS5_VABI sceAmprAmmSubmitCommandBuffer2(void* base, std::uint32_t offset, s
 }
 
 int APS5_VABI sceAmprAmmSubmitCommandBuffer3(void* base, std::uint32_t offset, std::uint32_t priority, std::uint32_t* id) {
+    APS5_TRACE("sceAmprAmmSubmitCommandBuffer3", (uintptr_t)base);
     if (priority > 2u) return SCE_KERNEL_ERROR_EINVAL;
     if (!base) return SCE_KERNEL_ERROR_EPERM;
     const auto submitted = AmmSubmit_nid_no_patch(base, offset);
@@ -898,6 +939,7 @@ int APS5_VABI sceAmprAmmSubmitCommandBuffer3(void* base, std::uint32_t offset, s
 }
 
 int APS5_VABI sceAmprAmmWaitCommandBufferCompletion(std::uint32_t id) {
+    APS5_TRACE("sceAmprAmmWaitCommandBufferCompletion", (uintptr_t)id);
     return AmmSubmitted_nid_no_patch(id) ? 0 : SCE_KERNEL_ERROR_ESRCH;
 }
 

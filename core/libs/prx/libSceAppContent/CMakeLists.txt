@@ -1,5 +1,8 @@
 add_library(libSceAppContent SHARED EXCLUDE_FROM_ALL Export.cpp)
 target_include_directories(libSceAppContent PRIVATE ${LIBS_INCLUDE_DIR})
+# sceAppContentInitialize posts the entitlement event into libSceSystemService
+# (cross-module NID import, same mechanism as libSceVideoOut -> libSceAgcDriver).
+target_link_libraries(libSceAppContent PRIVATE libSceSystemService)
 configure_windows_unwind(libSceAppContent)
 
 if(BUILD_TESTING)

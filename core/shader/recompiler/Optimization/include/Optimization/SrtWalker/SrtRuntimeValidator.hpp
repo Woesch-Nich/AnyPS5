@@ -14,6 +14,11 @@ public:
 
     bool Run(IrValue* value) { return Validate(value); }
 
+
+    // slot fold) — reused by ResourceTracker::Rematerialize to keep folded
+    // ReadConst(SRT, runtimeSlot) leaves rematerializable in the split paths.
+    bool ValidateSrtSlot(IrValue* value, std::unordered_set<IrValue*>& visiting, bool checkDescriptors);
+
 private:
     bool ValidateArguments(IrValue& inst, bool requireUniform);
     bool Validate(IrValue* raw, bool requireUniform = true);

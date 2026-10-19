@@ -15,6 +15,20 @@
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+namespace {
+const bool kFlipTrace = [] { return std::getenv("APS5_TRACE_FLIP") != nullptr; }();
+unsigned flipTid() {
+#ifdef _WIN32
+    return ::GetCurrentThreadId();
+#else
+    return 0;
+#endif
+}
+}
 
 namespace AgcDriver::DriverDetail {
 
@@ -317,6 +331,7 @@ void Driver::executeRewindTail(const Submission& stalled) {
 }
 
 void Driver::Submit(const Packet* packet, std::uint32_t queue) {
+    if (kFlipTrace) std::fprintf(stderr, "[flip] driver-submit queue=0x%x dwords=%u addr=0x%x tid=0x%x\n", queue, packet ? packet->dw_num : 0, packet ? (uintptr_t)packet->addr : 0, flipTid());
     const auto receivedAt = APS5_ENABLE_TIMING_LOG ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     CheckFailure();
     require(queue == 0 || (queue >= 0x20 && queue < SubmissionQueueEnd), "unsupported compute queue");
@@ -341,7 +356,9 @@ void Driver::Submit(const Packet* packet, std::uint32_t queue) {
     validate(submission, descriptor.addr);
     readRegisterLists(submission);
     if (APS5_ENABLE_TIMING_LOG) submission.validatedAt = std::chrono::steady_clock::now();
+    const auto flipStart = std::chrono::steady_clock::now();
     waitForFlipRoom(submission);
+    if (kFlipTrace) std::fprintf(stderr, "[flip] flip-room queue=0x%x waited=%.1f ms tid=0x%x\n", queue, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - flipStart).count(), flipTid());
     holdFlipBehindWorker(submission);
     AwaitRegistrationPreparation();
     if (APS5_ENABLE_TIMING_LOG) submission.roomReadyAt = std::chrono::steady_clock::now();

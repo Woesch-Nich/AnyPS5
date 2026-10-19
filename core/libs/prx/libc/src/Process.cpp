@@ -15,6 +15,7 @@
 #include <atomic>
 #include <stdexcept>
 #include "prx/libc/include/Shutdown.hpp"
+#include "prx/libkernel/Pthread/include/JobDiag.hpp"
 
 #include "prx/libc/include/General.hpp"
 #include "SceTypes.hpp"
@@ -145,6 +146,7 @@ void StartExit() {
 extern "C" {
 
 [[noreturn]] void APS5_VABI _Exit_nid_postfix(int code) {
+    aps5::jobdiag::ExitHook("_Exit", code, __builtin_return_address(0));
     static const bool trace = std::getenv("APS5_TRACE_EXIT") != nullptr;
     if (trace) {
         std::fprintf(stderr, "[libc] _Exit(%d) called from %p\n", code, __builtin_return_address(0));
@@ -180,6 +182,7 @@ void LibcStartExit_nid_postfix() {
 }
 
 void APS5_VABI exit_nid_postfix(int code) {
+    aps5::jobdiag::ExitHook("exit", code, __builtin_return_address(0));
     static const bool trace = std::getenv("APS5_TRACE_EXIT") != nullptr;
     if (trace) {
         std::fprintf(stderr, "[libc] exit(%d) called from %p\n", code, __builtin_return_address(0));
@@ -189,6 +192,7 @@ void APS5_VABI exit_nid_postfix(int code) {
 }
 
 [[noreturn]] void APS5_VABI catchReturnFromMain_nid_postfix(int status) {
+    aps5::jobdiag::ExitHook("return-from-main", status, __builtin_return_address(0));
     LibcExit_nid_no_patch(status);
 }
 
@@ -198,6 +202,7 @@ void APS5_VABI exit_nid_postfix(int code) {
 ) {
     (void)arg0; (void)arg1; (void)arg2;
     (void)arg3; (void)arg4; (void)arg5;
+    aps5::jobdiag::ExitHook("abort", -1, __builtin_return_address(0));
     LibcRunEndFlush_nid_no_patch();
     std::fprintf(stderr, "[libc] abort() called from %p\n", __builtin_return_address(0));
     std::fflush(nullptr);

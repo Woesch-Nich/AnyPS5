@@ -204,7 +204,8 @@ public:
 
     void Require(std::uint64_t count, std::uint64_t elementSize = 1u) const {
         if (count > (m_data.size() - m_offset) / elementSize) {
-            throw std::runtime_error("RequestSerializer: truncated data");
+            throw std::runtime_error("RequestSerializer: truncated data (offset=" + std::to_string(m_offset) +
+                " need=" + std::to_string(count * elementSize) + " total=" + std::to_string(m_data.size()) + ")");
         }
     }
 

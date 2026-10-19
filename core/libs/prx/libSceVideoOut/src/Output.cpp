@@ -1,15 +1,33 @@
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <stdexcept>
 #include <cmath>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "SceTypes.hpp"
 #include "prx/libSceVideoOut/include/Output.hpp"
 #include "prx/libc/include/General.hpp"
+
+namespace {
+const bool kFlipTrace = [] { return std::getenv("APS5_TRACE_FLIP") != nullptr; }();
+double flipMs() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+unsigned flipTid() {
+#ifdef _WIN32
+    return ::GetCurrentThreadId();
+#else
+    return 0;
+#endif
+}
+}
 #include "prx/libSceVideoOut/include/VideoOutDriver.hpp"
 #include "prx/libkernel/AppMetadata/include/AppMetadata.hpp"
 #include "prx/libSceAgcDriver/Execution/include/HostHdr.hpp"
@@ -92,12 +110,14 @@ int APS5_VABI sceVideoOutOpen(int userId, int busType, int index, const void* pa
     }
     const int handle = VideoOutDriver::Get().Open(busType);
     if (handle < 0) return VIDEO_OUT_ERROR_RESOURCE_BUSY;
+    if (kFlipTrace) std::fprintf(stderr, "[flip] api sceVideoOutOpen bus=%d handle=%d tid=0x%x\n", busType, handle, flipTid());
     return handle;
 } catch (const ProcessShutdown&) {
     LibcAwaitExit_nid_postfix();
 }
 
 int APS5_VABI sceVideoOutClose(int handle) try {
+    if (kFlipTrace) std::fprintf(stderr, "[flip] api sceVideoOutClose handle=%d tid=0x%x\n", handle, flipTid());
     return VideoOutDriver::Get().Close(handle) ? 0 : VIDEO_OUT_ERROR_INVALID_HANDLE;
 } catch (const ProcessShutdown&) {
     LibcAwaitExit_nid_postfix();
@@ -121,6 +141,7 @@ int APS5_VABI sceVideoOutSetFlipRate(int handle, int rate) try {
     std::lock_guard lock(cfg->mutex);
     cfg->Check();
     cfg->flipRate = rate;
+    if (kFlipTrace) std::fprintf(stderr, "[flip] api sceVideoOutSetFlipRate handle=%d rate=%d tid=0x%x\n", handle, rate, flipTid());
     return 0;
 } catch (const ProcessShutdown&) {
     LibcAwaitExit_nid_postfix();
@@ -165,6 +186,7 @@ int APS5_VABI sceVideoOutGetVblankStatus(int handle, VideoOutVblankStatus* statu
     } else {
         *status = cfg->vblankStatus;
     }
+    if (kFlipTrace) std::fprintf(stderr, "[flip] api sceVideoOutGetVblankStatus handle=%d count=%llu tid=0x%x\n", handle, static_cast<unsigned long long>(status->count), flipTid());
     return 0;
 } catch (const ProcessShutdown&) {
     LibcAwaitExit_nid_postfix();
@@ -229,6 +251,7 @@ int APS5_VABI sceVideoOutIsFlipPending(int handle) try {
     }
     std::unique_lock lock(cfg->mutex);
     cfg->Check();
+    if (kFlipTrace) std::fprintf(stderr, "[flip] api sceVideoOutIsFlipPending handle=%d pending=%llu tid=0x%x\n", handle, static_cast<unsigned long long>(cfg->flipStatus.flipPendingNum), flipTid());
     return cfg->flipStatus.flipPendingNum;
 } catch (const ProcessShutdown&) {
     LibcAwaitExit_nid_postfix();
@@ -239,11 +262,14 @@ int APS5_VABI sceVideoOutWaitVblank(int handle) try {
     if (cfg == nullptr) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
     }
+    if (kFlipTrace) std::fprintf(stderr, "[flip] api sceVideoOutWaitVblank start handle=%d count=%llu opened=%d tid=0x%x\n", handle, static_cast<unsigned long long>(cfg->vblankStatus.count), cfg->opened ? 1 : 0, flipTid());
+    const auto start = flipMs();
     std::unique_lock lock(cfg->mutex);
     cfg->Check();
     const uint64_t count = cfg->vblankStatus.count;
     cfg->vblankCond.wait(lock, cfg->shutdownToken, [&] { return !cfg->opened || cfg->closing || cfg->failure || cfg->vblankStatus.count != count; });
     cfg->Check();
+    if (kFlipTrace) std::fprintf(stderr, "[flip] api sceVideoOutWaitVblank end handle=%d count=%llu took=%.1f ms tid=0x%x\n", handle, static_cast<unsigned long long>(cfg->vblankStatus.count), flipMs() - start, flipTid());
     return 0;
 } catch (const ProcessShutdown&) {
     LibcAwaitExit_nid_postfix();
@@ -279,6 +305,7 @@ int APS5_VABI sceVideoOutConfigureOutput(int handle, uint64_t mode, const VideoO
     std::unique_lock lock(cfg->mutex);
     cfg->Check();
     cfg->outputMode = mode;
+    if (kFlipTrace) std::fprintf(stderr, "[flip] api sceVideoOutConfigureOutput handle=%d mode=0x%llx tid=0x%x\n", handle, static_cast<unsigned long long>(mode), flipTid());
     return 0;
 } catch (const ProcessShutdown&) {
     LibcAwaitExit_nid_postfix();
@@ -384,7 +411,7 @@ int APS5_VABI sceVideoOutSetGlobalBlendSpace(int handle, uint32_t space, uint32_
 int APS5_VABI sceVideoOutVrrUnpegFromFixedRate(int handle) try {
     if (VideoOutDriver::Get().GetConfig(handle) == nullptr) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
-    }
+    }    if (kFlipTrace) std::fprintf(stderr, "[flip] api sceVideoOutVrrUnpegFromFixedRate handle=%d tid=0x%x\n", handle, flipTid());
     return 0;
 } catch (const ProcessShutdown&) {
     LibcAwaitExit_nid_postfix();
@@ -394,10 +421,10 @@ int APS5_VABI sceVideoOutVrrPegToFixedRate(int handle, uint64_t arg1, uint64_t a
     if (VideoOutDriver::Get().GetConfig(handle) == nullptr) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
     }
+    if (kFlipTrace) std::fprintf(stderr, "[flip] api sceVideoOutVrrPegToFixedRate handle=%d arg1=%llu arg2=%llu tid=0x%x\n", handle, static_cast<unsigned long long>(arg1), static_cast<unsigned long long>(arg2), flipTid());
     if (arg1 != 0 || arg2 != 0) {
         throw std::runtime_error(std::string(__func__) + ": unknown arguments " + std::to_string(arg1) + ", " + std::to_string(arg2));
-    }
-    return 0;
+    }    return 0;
 } catch (const ProcessShutdown&) {
     LibcAwaitExit_nid_postfix();
 }

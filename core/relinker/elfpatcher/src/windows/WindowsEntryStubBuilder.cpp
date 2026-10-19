@@ -9,6 +9,8 @@
 #include <set>
 #include <optional>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 
 namespace Elfpatcher::Windows {
 
@@ -34,6 +36,15 @@ std::string normalizeRunPath(std::string path) {
     if (path.back() != '\\')
         path.push_back('\\');
     return path;
+}
+
+// #A39/#A41: library basename matching the search-order logic (line ~95) —
+// the .guest.prx suffix is stripped so the name equals the PRX module name.
+std::string libraryBaseName(const std::string& library) {
+    std::string name = std::filesystem::path(library).filename().string();
+    if (name.size() > 10 && name.ends_with(".guest.prx"))
+        name.resize(name.size() - 10);
+    return name;
 }
 
 std::u16string toUtf16(const std::string& text) {
@@ -63,6 +74,7 @@ std::u16string toUtf16(const std::string& text) {
         index += length;
     }
     return result;
+
 }
 
 }
@@ -135,6 +147,14 @@ WindowsEntryStub WindowsEntryStubBuilder::Build(const std::uint32_t dataRva, con
     for (const auto& import : imports)
         symbolNames.push_back(addString(import.Name));
 
+    // #A39/#A41: link-time binding log — one line per import: NID, declared module,
+    // slot (TargetRva), and the actual GetProcAddress search order (declared module
+    // first, then every sibling fallback appended below). This is the mismatch list:
+    // any slot that stays NULL at runtime had its NID searched here in this order.
+    std::ofstream bindingLog(std::filesystem::absolute("windows-diagnostics-binding.txt"), std::ios::trunc);
+    if (dependencyDiagnostics)
+        bindingLog << "nid,declared_module,slot,search_order\n";
+
     std::vector<std::uint32_t> searchTables;
     std::vector<std::uint32_t> searchCounts;
     std::vector<bool> platformTlsResolvers;
@@ -163,6 +183,31 @@ WindowsEntryStub WindowsEntryStubBuilder::Build(const std::uint32_t dataRva, con
                         order.push_back(CheckedRva(index));
                 }
             }
+        }
+        // PS5 NIDs form a single global namespace: any loaded library that exports the
+        // symbol can satisfy the import, regardless of which module declared it. #684
+        // (bind imports to their declared modules) makes the declared module the primary
+        // target but must not exclude siblings — on real hardware a symbol exported by
+        // libSceNpPartner001 resolves for an import declared against libSceNpManager,
+        // whether those are guest or host (libs\).prx modules. Append every library not
+        // already in the search order as a fallback, so the declared module is still
+        // preferred while cross-module exports still resolve.
+        if (!import.Library.empty()) {
+            for (std::size_t index = 0; index < libraries.size(); ++index) {
+                const auto rva = CheckedRva(index);
+                if (std::find(order.begin(), order.end(), rva) == order.end()) order.push_back(rva);
+            }
+        }
+        if (dependencyDiagnostics && bindingLog) {
+            std::ostringstream slot;
+            slot << "0x" << std::hex << import.TargetRva;
+            std::ostringstream ord;
+            for (std::size_t k = 0; k < order.size(); ++k) {
+                if (k) ord << ';';
+                ord << order[k] << ':' << libraryBaseName(libraries[order[k]]);
+            }
+            bindingLog << import.Name << ',' << (import.Library.empty() ? "-" : import.Library) << ','
+                       << slot.str() << ',' << ord.str() << '\n';
         }
         Io::AlignBuffer(data, 4);
         platformTlsResolvers.push_back(std::none_of(order.begin(), order.end(), [&](auto index) {

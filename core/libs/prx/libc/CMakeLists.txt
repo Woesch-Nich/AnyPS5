@@ -838,4 +838,14 @@ if(MINGW)
             PASS_REGULAR_EXPRESSION "kept failure report ran[^~]*aborting[^~]*SIGABRT. on thread[^~]*all threads:"
             FAIL_REGULAR_EXPRESSION "kept failure report ran[^~]*kept failure report ran")
     endif()
+    # a214 (#A214-answer): whole-range Map() (APS5_MAP_WHOLE) — partial unmap/protect after a whole map.
+    if(WIN32)
+        add_test_executable(windows_mappings_whole_map_tests ${LIBS_INCLUDE_DIR}/tests/WindowsMappingsWholeMap.cpp)
+        target_include_directories(windows_mappings_whole_map_tests PRIVATE ${LIBS_INCLUDE_DIR})
+        target_link_libraries(windows_mappings_whole_map_tests PRIVATE libc)
+        configure_windows_unwind(windows_mappings_whole_map_tests)
+        add_test(NAME windows_mappings_whole_map COMMAND windows_mappings_whole_map_tests)
+        set_tests_properties(windows_mappings_whole_map PROPERTIES TIMEOUT 60
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
 endif()
